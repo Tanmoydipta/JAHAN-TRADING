@@ -37,23 +37,16 @@ A physical or virtual Android device is also useful for testing:
 
 ## 3. Point the app at your live API before building for a client
 
-The app talks to the Flask REST API, not the database directly — same
-security model as the desktop exe. Before shipping to a real client, the
-Flask server needs to be reachable from their phone over the internet
-(not `10.0.2.2` or a LAN IP, unless the client's phone is on the same LAN as
-the machine running the exe).
+**Already done** — the backend is deployed to Render (see `../DEPLOYMENT.md`)
+and the `release` block in `app/build.gradle.kts` already points at it:
+```kotlin
+buildConfigField("String", "API_BASE_URL", "\"https://jahan-trading.onrender.com/\"")
+```
+Nothing to change here unless the Render service URL changes later.
 
-- Deploy `app.py` + `database.py` + `ca.pem` to a host with a public URL and
-  HTTPS (Railway, Render, or a VPS with a reverse proxy + TLS cert).
-- Open `app/build.gradle.kts`, find the `release` block, and replace:
-  ```kotlin
-  buildConfigField("String", "API_BASE_URL", "\"https://your-api.example.com/\"")
-  ```
-  with the real deployed URL (must end in `/`).
-- Alternatively, skip this and let the client type the server URL directly
-  into the login screen's "API Server" field at first launch — the app
-  saves whatever URL is entered, so a hardcoded release default isn't
-  strictly required, just a convenience.
+(As a fallback, the client can always type a different server URL directly
+into the login screen's "API Server" field at first launch — the app saves
+whatever URL is entered, overriding this hardcoded default.)
 
 ## 4. Generate the release APK
 

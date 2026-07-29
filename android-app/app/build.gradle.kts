@@ -31,8 +31,7 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            // Override with your deployed API URL
-            buildConfigField("String", "API_BASE_URL", "\"https://your-api.example.com/\"")
+            buildConfigField("String", "API_BASE_URL", "\"https://jahan-trading.onrender.com/\"")
         }
     }
 

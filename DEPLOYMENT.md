@@ -69,7 +69,9 @@ until you give it one directly through Render (never through git):
 
 1. In the new service → **Environment** tab → **Secret Files** → **Add
    Secret File**.
-2. **Filename/path**: `/etc/secrets/config.json`
+2. **Filename**: `config.json` (just the bare name — Render rejects a
+   path here and mounts it under `/etc/secrets/` automatically; you don't
+   type that prefix yourself)
 3. **Contents**: paste the full contents of your local `config.json`
    (the real one, with the live Aiven credentials).
 4. Same for `ca.pem` if you're not already committing it (it's just a
