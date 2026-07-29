@@ -359,12 +359,51 @@ async function loadUsersList() {
         <td><span class="badge">${u.role}</span></td>
         <td>${u.client_id}</td>
         <td><span class="status-badge ${u.is_active ? 'paid' : 'pending'}">${u.is_active ? 'Active' : 'Inactive'}</span></td>
-        <td>${canDelete ? `<button class="btn btn-secondary" style="padding:4px 10px; font-size:11px; color:var(--accent-rose);" onclick="deleteUser(${u.id})"><i class="fa-solid fa-trash"></i> Delete</button>` : '-'}</td>
+        <td style="white-space:nowrap;">
+          <button class="btn btn-secondary" style="padding:4px 10px; font-size:11px; margin-right:6px;" onclick="openEditUserModal(${u.id}, '${u.username}')"><i class="fa-solid fa-user-pen"></i> Edit</button>
+          ${canDelete ? `<button class="btn btn-secondary" style="padding:4px 10px; font-size:11px; color:var(--accent-rose);" onclick="deleteUser(${u.id})"><i class="fa-solid fa-trash"></i> Delete</button>` : ''}
+        </td>
       `;
       tbody.appendChild(tr);
     });
   } catch (err) {
     console.error("Error loading users list:", err);
+  }
+}
+
+let editUserTargetId = null;
+
+function openEditUserModal(userId, currentUsername) {
+  editUserTargetId = userId;
+  document.getElementById("euUsername").value = currentUsername;
+  document.getElementById("euPassword").value = "";
+  document.getElementById("editUserModal").classList.add("active");
+}
+
+function closeEditUserModal() {
+  document.getElementById("editUserModal").classList.remove("active");
+  editUserTargetId = null;
+}
+
+async function submitEditUser() {
+  const username = document.getElementById("euUsername").value.trim();
+  const password = document.getElementById("euPassword").value;
+  if (!username) { alert("Username cannot be empty."); return; }
+  try {
+    const res = await apiFetch(`/api/users/${editUserTargetId}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password })
+    });
+    const data = await res.json();
+    if (data.status === "success") {
+      closeEditUserModal();
+      loadUsersList();
+    } else {
+      alert("Update failed: " + data.message);
+    }
+  } catch (err) {
+    alert("Connection error: " + err.message);
   }
 }
 

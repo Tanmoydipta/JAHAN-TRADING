@@ -610,6 +610,34 @@
     </div>
   </div>
 
+  <div class="modal-overlay" id="editUserModal">
+    <div class="modal-content" style="max-width: 420px;">
+      <div class="modal-header">
+        <h3><i class="fa-solid fa-user-pen"></i> Edit User Account</h3>
+        <div class="modal-actions">
+          <button class="btn btn-secondary" onclick="closeEditUserModal()">
+            <i class="fa-solid fa-xmark"></i> Close
+          </button>
+        </div>
+      </div>
+      <div style="padding: 20px;">
+        <div class="form-group">
+          <label>Username / Login ID</label>
+          <input type="text" id="euUsername" class="form-control">
+        </div>
+        <div class="form-group" style="margin-top: 14px;">
+          <label>New Password (leave blank to keep unchanged)</label>
+          <input type="password" id="euPassword" class="form-control" placeholder="Set a new password">
+        </div>
+        <div class="form-actions" style="margin-top: 18px;">
+          <button class="btn btn-primary" onclick="submitEditUser()">
+            <i class="fa-solid fa-check"></i> Save Changes
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <script src="/static/app.js"></script>
 </body>
 </html>

@@ -11,7 +11,7 @@ from database import (
     get_next_chalan, list_products, list_customers,
     list_inventory, get_dashboard,
     authorize_entry, list_pending_transactions,
-    delete_entry, delete_user,
+    delete_entry, delete_user, update_user,
     adjust_entry, list_invoice_refs,
     create_session_token, verify_session_token, revoke_session_token,
     get_letterhead_settings, save_letterhead_settings
@@ -327,6 +327,21 @@ def api_delete_user(user_id):
         return jsonify({"status": "error", "message": "Only an admin can delete user accounts"}), 403
     try:
         return jsonify(delete_user(user_id, request.current_user['username']))
+    except ValueError as e:
+        return jsonify({"status": "error", "message": str(e)}), 403
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+
+
+@app.route('/api/users/<int:user_id>', methods=['PUT'])
+def api_update_user(user_id):
+    if request.current_user['role'] != 'admin':
+        return jsonify({"status": "error", "message": "Only an admin can edit user accounts"}), 403
+    data = request.json or {}
+    new_username = (data.get('username') or '').strip() or None
+    new_password = data.get('password') or None
+    try:
+        return jsonify(update_user(user_id, request.current_user['username'], new_username, new_password))
     except ValueError as e:
         return jsonify({"status": "error", "message": str(e)}), 403
     except Exception as e:

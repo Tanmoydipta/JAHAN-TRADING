@@ -1108,6 +1108,44 @@ def delete_user(user_id, requested_by):
         conn.close()
 
 
+def update_user(user_id, requested_by, new_username=None, new_password=None):
+    conn, mode = get_db_connection()
+    cursor = conn.cursor()
+    ph = _ph(mode)
+
+    try:
+        role = _lookup_user_role(cursor, mode, requested_by)
+        if role != 'admin':
+            raise ValueError("Only an admin can edit user accounts")
+
+        cursor.execute(f"SELECT id FROM users WHERE id = {ph}", (user_id,))
+        if not cursor.fetchone():
+            raise ValueError("User not found")
+
+        sets, params = [], []
+        if new_username:
+            sets.append(f"username = {ph}")
+            params.append(new_username)
+        if new_password:
+            sets.append(f"password_hash = {ph}")
+            params.append(hash_password(new_password))
+        if not sets:
+            raise ValueError("Nothing to update — provide a new username and/or password")
+
+        params.append(user_id)
+        try:
+            cursor.execute(f"UPDATE users SET {', '.join(sets)} WHERE id = {ph}", params)
+        except Exception:
+            raise ValueError("That username is already taken by another account")
+
+        if mode == 'sqlite':
+            conn.commit()
+
+        return {"status": "success", "id": user_id}
+    finally:
+        conn.close()
+
+
 # ---------------- REPORTS ----------------
 def execute_report(report_id, client_id=None, date_from=None, date_to=None,
                    customer=None, txn_type=None):
