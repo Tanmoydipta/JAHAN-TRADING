@@ -18,6 +18,21 @@ let customersByTypeCache = {};
 
 document.addEventListener("DOMContentLoaded", () => { initApp(); });
 
+// ---------------- MOBILE SIDEBAR ----------------
+function toggleMobileSidebar() {
+  document.getElementById("appSidebar").classList.toggle("mobile-open");
+  document.getElementById("sidebarBackdrop").classList.toggle("active");
+}
+
+function closeMobileSidebar() {
+  document.getElementById("appSidebar").classList.remove("mobile-open");
+  document.getElementById("sidebarBackdrop").classList.remove("active");
+}
+
+document.querySelector(".nav-menu")?.addEventListener("click", (e) => {
+  if (e.target.closest(".nav-item")) closeMobileSidebar();
+});
+
 // Every API call except /api/config and /api/login requires this app's
 // session token — attach it here so none of the ~20 call sites below need
 // to remember to do so individually.

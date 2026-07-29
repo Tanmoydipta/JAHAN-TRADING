@@ -53,8 +53,9 @@
   </div>
 
   <div class="app-layout">
+    <div class="sidebar-backdrop" id="sidebarBackdrop" onclick="closeMobileSidebar()"></div>
     <!-- Sidebar Navigation -->
-    <aside class="sidebar">
+    <aside class="sidebar" id="appSidebar">
       <div class="brand-header">
         <div class="brand-logo"><i class="fa-solid fa-cube"></i></div>
         <div class="brand-info">
@@ -114,8 +115,13 @@
     <main class="main-content">
       <header class="topbar">
         <div class="topbar-left">
-          <h1 id="pageTitle">Dashboard Overview</h1>
-          <p id="pageSubtitle">Real-time business performance metrics.</p>
+          <button class="mobile-menu-btn" onclick="toggleMobileSidebar()" aria-label="Toggle menu">
+            <i class="fa-solid fa-bars"></i>
+          </button>
+          <div class="topbar-title-group">
+            <h1 id="pageTitle">Dashboard Overview</h1>
+            <p id="pageSubtitle">Real-time business performance metrics.</p>
+          </div>
         </div>
         <div class="topbar-right">
           <div class="quick-actions">
