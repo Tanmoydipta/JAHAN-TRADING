@@ -638,6 +638,27 @@
     </div>
   </div>
 
+  <div class="modal-overlay" id="editRecordModal">
+    <div class="modal-content" style="max-width: 420px;">
+      <div class="modal-header">
+        <h3><i class="fa-solid fa-pen-to-square"></i> Edit Record</h3>
+        <div class="modal-actions">
+          <button class="btn btn-secondary" onclick="closeEditRecordModal()">
+            <i class="fa-solid fa-xmark"></i> Close
+          </button>
+        </div>
+      </div>
+      <div style="padding: 20px;">
+        <div id="editRecordFieldsContainer"></div>
+        <div class="form-actions" style="margin-top: 18px;">
+          <button class="btn btn-primary" onclick="submitEditRecord()">
+            <i class="fa-solid fa-check"></i> Save Changes
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <script src="/static/app.js"></script>
 </body>
 </html>

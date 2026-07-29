@@ -427,6 +427,14 @@ async function deleteUser(userId) {
 }
 
 // ---------------- ENTRY FORM ----------------
+// Sales/purchases can carry multiple product line items sharing one
+// chalan_no / input_invoice_no. These field names are rendered inside the
+// repeatable line-item rows instead of the normal one-per-form loop.
+const MULTI_ITEM_FIELDS = {
+  new_sale: ['product_type', 'size', 'cost_price', 'received_quantity', 'sale_unit_price'],
+  new_purchase: ['product_type', 'size', 'unit_price', 'quantity']
+};
+
 async function renderEntryForm(entryId) {
   const ep = systemConfig.entry_points.find(x => x.id === entryId);
   if (!ep) return;
@@ -442,7 +450,11 @@ async function renderEntryForm(entryId) {
   const container = document.getElementById("formFieldsContainer");
   container.innerHTML = "";
 
+  const lineItemFieldNames = MULTI_ITEM_FIELDS[entryId] || [];
+
   for (const f of ep.fields) {
+    if (lineItemFieldNames.includes(f.name)) continue;
+
     const group = document.createElement("div");
     group.className = "form-group col-6";
     const label = document.createElement("label");
@@ -581,13 +593,13 @@ async function renderEntryForm(entryId) {
     input.id = `input_${f.name}`;
 
     // Recalc totals as user types
-    if (ep.table === 'sales' && ['received_quantity', 'sale_unit_price', 'advance'].includes(f.name)) {
+    if (MULTI_ITEM_FIELDS[entryId]) {
+      if (f.name === 'advance') input.oninput = () => recalcLineItemTotals(entryId);
+    } else if (ep.table === 'sales' && ['received_quantity', 'sale_unit_price', 'advance'].includes(f.name)) {
       input.oninput = calculateSalesTotal;
-    }
-    if (ep.table === 'purchases' && ['quantity', 'unit_price', 'advance'].includes(f.name)) {
+    } else if (ep.table === 'purchases' && ['quantity', 'unit_price', 'advance'].includes(f.name)) {
       input.oninput = calculatePurchaseTotal;
-    }
-    if (ep.table === 'transporters' && ['rent', 'advance'].includes(f.name)) {
+    } else if (ep.table === 'transporters' && ['rent', 'advance'].includes(f.name)) {
       input.oninput = calculateTransporterTotal;
     }
 
@@ -630,6 +642,29 @@ async function renderEntryForm(entryId) {
     } catch (e) { /* ignore */ }
   }
 
+  // Multi-product line items (sales/purchases only)
+  if (MULTI_ITEM_FIELDS[entryId]) {
+    const wrap = document.createElement("div");
+    wrap.className = "form-group col-12";
+    wrap.innerHTML = `
+      <label style="display:flex; justify-content:space-between; align-items:center;">
+        <span>Product Line Items</span>
+        <span style="display:flex; align-items:center; gap:8px; font-weight:400;">
+          Number of Products:
+          <input type="number" id="lineItemCount" class="form-control" style="width:80px;" min="1" value="1">
+        </span>
+      </label>
+      <div id="lineItemsContainer" style="margin-top:10px; display:flex; flex-direction:column; gap:14px;"></div>
+    `;
+    container.appendChild(wrap);
+    document.getElementById("lineItemCount").addEventListener("input", (e) => {
+      let n = parseInt(e.target.value || "1", 10);
+      if (!n || n < 1) n = 1;
+      renderLineItemRows(entryId, n);
+    });
+    renderLineItemRows(entryId, 1);
+  }
+
   // Live totals box
   if (ep.table === 'sales' || ep.table === 'purchases' || ep.table === 'transporters') {
     const totalBox = document.createElement("div");
@@ -649,6 +684,163 @@ async function renderEntryForm(entryId) {
     `;
     container.appendChild(totalBox);
   }
+}
+
+function renderLineItemRows(entryId, count) {
+  const rowsContainer = document.getElementById("lineItemsContainer");
+  if (!rowsContainer) return;
+  rowsContainer.innerHTML = "";
+  for (let i = 0; i < count; i++) {
+    rowsContainer.appendChild(buildLineItemRow(entryId, i));
+  }
+  recalcLineItemTotals(entryId);
+}
+
+function buildLineItemRow(entryId, idx) {
+  const row = document.createElement("div");
+  row.className = "form-grid";
+  row.style.cssText = "border:1px solid var(--border-color); border-radius:8px; padding:12px;";
+  row.dataset.rowIndex = idx;
+
+  const mkGroup = (colSpan, labelText) => {
+    const g = document.createElement("div");
+    g.className = `form-group col-${colSpan}`;
+    if (labelText) {
+      const l = document.createElement("label");
+      l.innerText = labelText;
+      g.appendChild(l);
+    }
+    return g;
+  };
+
+  if (entryId === "new_sale") {
+    const gProduct = mkGroup(4, `Product #${idx + 1} (from Inventory)`);
+    const selProduct = document.createElement("select");
+    selProduct.className = "form-control";
+    selProduct.id = `li_product_type_${idx}`;
+    selProduct.innerHTML = `<option value="">-- Select from Inventory --</option>`;
+    inventoryCache.forEach(item => {
+      if ((item.quantity || 0) <= 0) return;
+      const o = document.createElement("option");
+      o.value = item.product_type;
+      o.dataset.size = item.size;
+      o.dataset.cost = item.cost_price;
+      o.innerText = `${item.product_type} — ${item.size} (Stock: ${item.quantity}, Cost: BDT ${parseFloat(item.cost_price).toFixed(2)})`;
+      selProduct.appendChild(o);
+    });
+    selProduct.onchange = () => {
+      const opt = selProduct.options[selProduct.selectedIndex];
+      const sizeEl = document.getElementById(`li_size_${idx}`);
+      const costEl = document.getElementById(`li_cost_price_${idx}`);
+      if (sizeEl) sizeEl.value = opt.dataset.size || "";
+      if (costEl) costEl.value = opt.dataset.cost || 0;
+      recalcLineItemTotals(entryId);
+    };
+    gProduct.appendChild(selProduct);
+
+    const gSize = mkGroup(2, "Size");
+    const inSize = document.createElement("input");
+    inSize.type = "text"; inSize.className = "form-control"; inSize.id = `li_size_${idx}`; inSize.readOnly = true;
+    gSize.appendChild(inSize);
+
+    const gCost = mkGroup(2, "Cost (auto)");
+    const inCost = document.createElement("input");
+    inCost.type = "number"; inCost.className = "form-control"; inCost.id = `li_cost_price_${idx}`; inCost.readOnly = true; inCost.value = 0;
+    gCost.appendChild(inCost);
+
+    const gQty = mkGroup(2, "Qty *");
+    const inQty = document.createElement("input");
+    inQty.type = "number"; inQty.step = "any"; inQty.className = "form-control"; inQty.id = `li_received_quantity_${idx}`; inQty.value = 0;
+    inQty.oninput = () => recalcLineItemTotals(entryId);
+    gQty.appendChild(inQty);
+
+    const gPrice = mkGroup(2, "Sale Price *");
+    const inPrice = document.createElement("input");
+    inPrice.type = "number"; inPrice.step = "any"; inPrice.className = "form-control"; inPrice.id = `li_sale_unit_price_${idx}`; inPrice.value = 0;
+    inPrice.oninput = () => recalcLineItemTotals(entryId);
+    gPrice.appendChild(inPrice);
+
+    row.appendChild(gProduct); row.appendChild(gSize); row.appendChild(gCost); row.appendChild(gQty); row.appendChild(gPrice);
+  } else {
+    const gProduct = mkGroup(4, `Product #${idx + 1} Type *`);
+    const selProduct = document.createElement("select");
+    selProduct.className = "form-control";
+    selProduct.id = `li_product_type_${idx}`;
+    selProduct.innerHTML = `<option value="">-- Select Product --</option>`;
+    productsCache.forEach(p => {
+      const o = document.createElement("option");
+      o.value = p.product_type;
+      o.dataset.size = p.size;
+      o.dataset.price = p.unit_price;
+      o.innerText = `${p.product_type} — ${p.size} (BDT ${parseFloat(p.unit_price).toFixed(2)})`;
+      selProduct.appendChild(o);
+    });
+    selProduct.onchange = () => {
+      const opt = selProduct.options[selProduct.selectedIndex];
+      const sizeEl = document.getElementById(`li_size_${idx}`);
+      const priceEl = document.getElementById(`li_unit_price_${idx}`);
+      if (sizeEl) sizeEl.value = opt.dataset.size || "";
+      if (priceEl && opt.dataset.price) priceEl.value = opt.dataset.price;
+      recalcLineItemTotals(entryId);
+    };
+    gProduct.appendChild(selProduct);
+
+    const gSize = mkGroup(2, "Size");
+    const inSize = document.createElement("input");
+    inSize.type = "text"; inSize.className = "form-control"; inSize.id = `li_size_${idx}`;
+    gSize.appendChild(inSize);
+
+    const gQty = mkGroup(3, "Quantity *");
+    const inQty = document.createElement("input");
+    inQty.type = "number"; inQty.step = "any"; inQty.className = "form-control"; inQty.id = `li_quantity_${idx}`; inQty.value = 0;
+    inQty.oninput = () => recalcLineItemTotals(entryId);
+    gQty.appendChild(inQty);
+
+    const gPrice = mkGroup(3, "Unit Price *");
+    const inPrice = document.createElement("input");
+    inPrice.type = "number"; inPrice.step = "any"; inPrice.className = "form-control"; inPrice.id = `li_unit_price_${idx}`; inPrice.value = 0;
+    inPrice.oninput = () => recalcLineItemTotals(entryId);
+    gPrice.appendChild(inPrice);
+
+    row.appendChild(gProduct); row.appendChild(gSize); row.appendChild(gQty); row.appendChild(gPrice);
+  }
+
+  const gSubtotal = mkGroup(12, "");
+  gSubtotal.innerHTML = `<div style="text-align:right; font-size:12px; color:var(--text-muted);">Line Subtotal: <strong id="li_subtotal_${idx}" style="color:var(--accent-emerald);">BDT 0.00</strong></div>`;
+  row.appendChild(gSubtotal);
+
+  return row;
+}
+
+function recalcLineItemTotals(entryId) {
+  const rowsContainer = document.getElementById("lineItemsContainer");
+  if (!rowsContainer) return;
+  const rows = rowsContainer.querySelectorAll("[data-row-index]");
+  let grand = 0;
+  rows.forEach(row => {
+    const idx = row.dataset.rowIndex;
+    let qty, price;
+    if (entryId === "new_sale") {
+      qty = parseFloat(document.getElementById(`li_received_quantity_${idx}`)?.value || 0);
+      price = parseFloat(document.getElementById(`li_sale_unit_price_${idx}`)?.value || 0);
+    } else {
+      qty = parseFloat(document.getElementById(`li_quantity_${idx}`)?.value || 0);
+      price = parseFloat(document.getElementById(`li_unit_price_${idx}`)?.value || 0);
+    }
+    const subtotal = qty * price;
+    grand += subtotal;
+    const subtotalEl = document.getElementById(`li_subtotal_${idx}`);
+    if (subtotalEl) subtotalEl.innerText = `BDT ${subtotal.toFixed(2)}`;
+  });
+
+  const adv = parseFloat(document.getElementById("input_advance")?.value || 0);
+  const due = Math.max(0, grand - adv);
+  const totalEl = document.getElementById("liveCalculatedTotal");
+  const dueDisplayEl = document.getElementById("liveCalculatedDue");
+  if (totalEl) totalEl.innerText = `BDT ${grand.toFixed(2)}`;
+  if (dueDisplayEl) dueDisplayEl.innerText = `BDT ${due.toFixed(2)}`;
+  const dueEl = document.getElementById("input_due");
+  if (dueEl && !dueEl._userTouched) dueEl.value = due.toFixed(2);
 }
 
 function calculateSalesTotal() {
@@ -693,6 +885,33 @@ function calculateTransporterTotal() {
 
 function resetCurrentForm() { if (currentEntryId) renderEntryForm(currentEntryId); }
 
+function collectLineItems(entryId) {
+  const rowsContainer = document.getElementById("lineItemsContainer");
+  if (!rowsContainer) return [];
+  const rows = rowsContainer.querySelectorAll("[data-row-index]");
+  const items = [];
+  rows.forEach(row => {
+    const idx = row.dataset.rowIndex;
+    if (entryId === "new_sale") {
+      items.push({
+        product_type: document.getElementById(`li_product_type_${idx}`)?.value || "",
+        size: document.getElementById(`li_size_${idx}`)?.value || "",
+        cost_price: document.getElementById(`li_cost_price_${idx}`)?.value || 0,
+        received_quantity: document.getElementById(`li_received_quantity_${idx}`)?.value || 0,
+        sale_unit_price: document.getElementById(`li_sale_unit_price_${idx}`)?.value || 0
+      });
+    } else {
+      items.push({
+        product_type: document.getElementById(`li_product_type_${idx}`)?.value || "",
+        size: document.getElementById(`li_size_${idx}`)?.value || "",
+        quantity: document.getElementById(`li_quantity_${idx}`)?.value || 0,
+        unit_price: document.getElementById(`li_unit_price_${idx}`)?.value || 0
+      });
+    }
+  });
+  return items;
+}
+
 async function handleFormSubmit(event) {
   event.preventDefault();
   if (!currentEntryId) return;
@@ -702,18 +921,25 @@ async function handleFormSubmit(event) {
   const payload = { client_id: currentClientId, created_by: currentUser ? currentUser.username : null };
   for (let [k, v] of formData.entries()) payload[k] = v;
 
+  const isMultiItem = !!MULTI_ITEM_FIELDS[currentEntryId];
+  const url = isMultiItem ? `/api/entry/${currentEntryId}/multi` : `/api/entry/${currentEntryId}`;
+  const body = isMultiItem
+    ? JSON.stringify({ client_id: currentClientId, shared: payload, line_items: collectLineItems(currentEntryId) })
+    : JSON.stringify(payload);
+
   try {
-    const res = await apiFetch(`/api/entry/${currentEntryId}`, {
+    const res = await apiFetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
+      body
     });
     const data = await res.json();
 
     if (data.status === "success") {
       const pendingNote = data.entry_status === "pending" ? " — PENDING ADMIN AUTHORIZATION." : "";
-      const msg = data.chalan_no ? `Sale saved (Chalan #${data.chalan_no}).${pendingNote}` :
-                  data.input_invoice_no ? `Purchase saved (Invoice #${data.input_invoice_no}).${pendingNote}` :
+      const countNote = data.line_count > 1 ? ` (${data.line_count} products)` : "";
+      const msg = data.chalan_no ? `Sale saved (Chalan #${data.chalan_no})${countNote}.${pendingNote}` :
+                  data.input_invoice_no ? `Purchase saved (Invoice #${data.input_invoice_no})${countNote}.${pendingNote}` :
                   `Record saved to table '${data.table}'.`;
       alert(msg);
       if (data.chalan_no) openInvoiceModal(data.chalan_no);
@@ -756,7 +982,8 @@ const DELETABLE_REPORT_TABLES = {
   purchases_report: "purchases",
   transporter_report: "transporters",
   inventory_report: "inventory",
-  products_report: "products"
+  products_report: "products",
+  customer_report: "customers"
 };
 
 // Adjust (due date / advance delta) only makes sense for transaction tables
@@ -765,6 +992,14 @@ const ADJUSTABLE_REPORT_TABLES = {
   sales_report: "sales",
   purchases_report: "purchases",
   transporter_report: "transporters"
+};
+
+// Plain field edit (no derived totals/inventory side-effects) — master
+// data only. Maps a report id to {table, entryPointId}: entryPointId
+// points at the entry_point whose field list drives the edit modal's form.
+const EDITABLE_REPORT_TABLES = {
+  products_report: { table: "products", entryPointId: "new_product" },
+  customer_report: { table: "customers", entryPointId: "new_customer" }
 };
 
 async function loadReportData(reportId) {
@@ -790,10 +1025,12 @@ async function loadReportData(reportId) {
 
     const deleteTable = DELETABLE_REPORT_TABLES[reportId];
     const adjustTable = ADJUSTABLE_REPORT_TABLES[reportId];
+    const editSpec = EDITABLE_REPORT_TABLES[reportId];
     const canDelete = deleteTable && currentPermissions && currentPermissions.can_delete;
     const canAdjust = adjustTable && currentUser && currentUser.role === 'admin';
+    const canEdit = editSpec && currentUser && currentUser.role === 'admin';
     const canDownloadInvoice = reportId === 'sales_report';
-    const showActions = canDelete || canAdjust || canDownloadInvoice;
+    const showActions = canDelete || canAdjust || canEdit || canDownloadInvoice;
 
     const NUM_COLS = new Set(["qty","quantity","unit price","total","advance","due","rent","cost","price","amount","transport cost","profit","revenue","stock valuation","cost price","sale price"]);
     const theadTr = document.getElementById("reportTableHead");
@@ -837,6 +1074,9 @@ async function loadReportData(reportId) {
           let html = "";
           if (canDownloadInvoice) {
             html += `<button class="btn btn-secondary" style="padding:4px 10px; font-size:11px; margin-right:6px;" onclick="openInvoiceModal('${row.chalan_no}')"><i class="fa-solid fa-file-invoice"></i> Invoice</button>`;
+          }
+          if (canEdit) {
+            html += `<button class="btn btn-secondary" style="padding:4px 10px; font-size:11px; margin-right:6px;" onclick="openEditRecordModalFromReport('${reportId}', ${row.id})"><i class="fa-solid fa-pen-to-square"></i> Edit</button>`;
           }
           if (canAdjust) {
             html += `<button class="btn btn-secondary" style="padding:4px 10px; font-size:11px; margin-right:6px;" onclick="openAdjustModal('${adjustTable}', ${row.id})"><i class="fa-solid fa-pen"></i> Adjust</button>`;
@@ -988,6 +1228,93 @@ async function submitAdjustEntry() {
       if (currentReportId) loadReportData(currentReportId);
     } else {
       alert("Adjustment failed: " + data.message);
+    }
+  } catch (err) {
+    alert("Connection error: " + err.message);
+  }
+}
+
+// ---------------- EDIT RECORD (products / customers) ----------------
+let editRecordTarget = { table: null, id: null };
+
+function openEditRecordModalFromReport(reportId, id) {
+  const spec = EDITABLE_REPORT_TABLES[reportId];
+  if (!spec) return;
+  const row = currentReportRawData.find(r => r.id === id);
+  if (!row) return;
+  openEditRecordModal(spec.table, spec.entryPointId, row);
+}
+
+function openEditRecordModal(table, entryPointId, row) {
+  editRecordTarget = { table, id: row.id };
+  const ep = systemConfig.entry_points.find(e => e.id === entryPointId);
+  if (!ep) return;
+
+  const container = document.getElementById("editRecordFieldsContainer");
+  container.innerHTML = "";
+  ep.fields.forEach(f => {
+    const group = document.createElement("div");
+    group.className = "form-group";
+    group.style.marginTop = "14px";
+    const label = document.createElement("label");
+    label.innerText = f.label;
+    group.appendChild(label);
+
+    let input;
+    if (f.type === "select") {
+      input = document.createElement("select");
+      input.className = "form-control";
+      f.options.forEach(opt => {
+        const o = document.createElement("option");
+        o.value = opt; o.innerText = opt;
+        input.appendChild(o);
+      });
+      input.value = row[f.name] ?? "";
+    } else {
+      input = document.createElement("input");
+      input.type = f.type === "number" ? "number" : "text";
+      input.className = "form-control";
+      if (f.type === "number") input.step = "any";
+      input.value = row[f.name] ?? "";
+    }
+    input.id = `er_${f.name}`;
+    group.appendChild(input);
+    container.appendChild(group);
+  });
+
+  document.getElementById("editRecordModal").classList.add("active");
+}
+
+function closeEditRecordModal() {
+  document.getElementById("editRecordModal").classList.remove("active");
+  editRecordTarget = { table: null, id: null };
+}
+
+async function submitEditRecord() {
+  const { table, id } = editRecordTarget;
+  if (!table || !id) return;
+
+  const spec = Object.values(EDITABLE_REPORT_TABLES).find(s => s.table === table);
+  const ep = systemConfig.entry_points.find(e => e.id === spec.entryPointId);
+  const payload = { client_id: currentClientId };
+  ep.fields.forEach(f => {
+    const el = document.getElementById(`er_${f.name}`);
+    if (el) payload[f.name] = el.value;
+  });
+
+  try {
+    const res = await apiFetch(`/api/record/${table}/${id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (data.status === "success") {
+      closeEditRecordModal();
+      await refreshLookups();
+      if (currentReportId) loadReportData(currentReportId);
+    } else {
+      alert("Update failed: " + data.message);
     }
   } catch (err) {
     alert("Connection error: " + err.message);
@@ -1187,32 +1514,37 @@ async function openInvoiceModal(invoiceRef) {
     document.getElementById("padInvDate").innerText = sale.sale_date || "-";
     document.getElementById("padPoOrder").innerText = sale.po_order || "-";
 
-    const qty = parseFloat(sale.received_quantity || 0);
-    const price = parseFloat(sale.sale_unit_price || 0);
-    const subtotal = qty * price;
-    const advance = parseFloat(sale.advance || 0);
-    const due = parseFloat(sale.due || 0);
-    const grand = parseFloat(sale.sale_total_price || subtotal);
-
-    document.getElementById("padItemsBody").innerHTML = `
+    // A multi-product sale shares one chalan_no across several rows —
+    // data.items holds all of them (single-product sales just have one).
+    const items = (data.items && data.items.length) ? data.items : [sale];
+    let grand = 0, totalAdvance = 0, totalDue = 0;
+    const rowsHtml = items.map((item, i) => {
+      const qty = parseFloat(item.received_quantity || 0);
+      const price = parseFloat(item.sale_unit_price || 0);
+      const rowSubtotal = qty * price;
+      grand += rowSubtotal;
+      totalAdvance += parseFloat(item.advance || 0);
+      totalDue += parseFloat(item.due || 0);
+      return `
       <tr>
-        <td>1</td>
-        <td><strong>${sale.product_type || '-'}</strong></td>
-        <td>${sale.size || '-'}</td>
+        <td>${i + 1}</td>
+        <td><strong>${item.product_type || '-'}</strong></td>
+        <td>${item.size || '-'}</td>
         <td style="text-align:center;">${qty}</td>
         <td style="text-align:right;">${price.toFixed(2)}</td>
-        <td style="text-align:right;"><strong>${subtotal.toFixed(2)}</strong></td>
-      </tr>
-    `;
+        <td style="text-align:right;"><strong>${rowSubtotal.toFixed(2)}</strong></td>
+      </tr>`;
+    }).join('');
+    document.getElementById("padItemsBody").innerHTML = rowsHtml;
 
     const transportBits = [];
     if (sale.transporter_name) transportBits.push(`Transporter: ${sale.transporter_name}`);
     if (sale.truck_no) transportBits.push(`Truck: ${sale.truck_no}`);
     document.getElementById("padTransport").innerText = transportBits.length ? transportBits.join(' | ') : '-';
 
-    document.getElementById("padSubtotal").innerText = `BDT ${subtotal.toFixed(2)}`;
-    document.getElementById("padAdvance").innerText = `BDT ${advance.toFixed(2)}`;
-    document.getElementById("padDue").innerText = `BDT ${due.toFixed(2)}`;
+    document.getElementById("padSubtotal").innerText = `BDT ${grand.toFixed(2)}`;
+    document.getElementById("padAdvance").innerText = `BDT ${totalAdvance.toFixed(2)}`;
+    document.getElementById("padDue").innerText = `BDT ${totalDue.toFixed(2)}`;
     document.getElementById("padGrandTotal").innerText = `BDT ${grand.toFixed(2)}`;
     document.getElementById("padFooterNote").innerText = lh.footer_note || "Thank you for your business!";
 

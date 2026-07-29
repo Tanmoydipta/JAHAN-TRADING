@@ -6,12 +6,12 @@ import webbrowser
 import threading
 from database import (
     init_db, load_config,
-    save_entry, execute_report, get_invoice_data,
+    save_entry, save_multi_item_entry, execute_report, get_invoice_data,
     authenticate_user, create_user, get_all_users,
     get_next_chalan, list_products, list_customers,
     list_inventory, get_dashboard,
     authorize_entry, list_pending_transactions,
-    delete_entry, delete_user, update_user,
+    delete_entry, delete_user, update_user, update_record,
     adjust_entry, list_invoice_refs,
     create_session_token, verify_session_token, revoke_session_token,
     get_letterhead_settings, save_letterhead_settings
@@ -216,6 +216,23 @@ def api_save_entry(entry_id):
         return jsonify({"status": "error", "message": str(e)}), 400
 
 
+@app.route('/api/entry/<entry_id>/multi', methods=['POST'])
+def api_save_multi_entry(entry_id):
+    data = request.json or {}
+    client_id = _scoped_client_id(data.get('client_id'))
+    if client_id is None:
+        return _forbidden()
+    created_by = request.current_user['username']
+    shared = data.get('shared', {})
+    line_items = data.get('line_items', [])
+    try:
+        return jsonify(save_multi_item_entry(entry_id, shared, line_items, client_id=client_id, created_by=created_by))
+    except ValueError as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+
+
 @app.route('/api/pending', methods=['GET'])
 def api_pending_transactions():
     client_id = _scoped_client_id(request.args.get('client_id'))
@@ -280,6 +297,21 @@ def api_delete_record(table_name, record_id):
     requested_by = request.current_user['username']
     try:
         return jsonify(delete_entry(table_name, record_id, requested_by, client_id))
+    except ValueError as e:
+        return jsonify({"status": "error", "message": str(e)}), 403
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+
+
+@app.route('/api/record/<table_name>/<int:record_id>', methods=['PUT'])
+def api_update_record(table_name, record_id):
+    data = request.json or {}
+    client_id = _scoped_client_id(data.get('client_id'))
+    if client_id is None:
+        return _forbidden()
+    requested_by = request.current_user['username']
+    try:
+        return jsonify(update_record(table_name, record_id, data, requested_by, client_id))
     except ValueError as e:
         return jsonify({"status": "error", "message": str(e)}), 403
     except Exception as e:

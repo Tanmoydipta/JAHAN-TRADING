@@ -855,6 +855,154 @@ def save_entry(entry_id, data, client_id=None, created_by=None):
         conn.close()
 
 
+def save_multi_item_entry(entry_id, shared_data, line_items, client_id=None, created_by=None):
+    """Like save_entry(), but inserts one row per product line item, all
+    sharing a single chalan_no/input_invoice_no. Only supports sales and
+    purchases — these are the only tables with a per-transaction reference
+    number that multiple product rows can share.
+
+    Advance/due are invoice-level concepts but the schema stores them per
+    row, so the full advance and the resulting due are attributed entirely
+    to the first row and left at 0 on the rest. That keeps SUM(due) and
+    SUM(advance) across the invoice's rows numerically correct without
+    prorating — prorating would let a single overpaid/underpaid line item
+    silently misstate that item's own due while the others looked fine.
+    """
+    config = load_config()
+    if not client_id:
+        client_id = config['system'].get('default_client_id', 'CLI-001')
+
+    entry_def = next((ep for ep in config.get('entry_points', []) if ep['id'] == entry_id), None)
+    if not entry_def:
+        raise ValueError(f"Unknown entry point ID: {entry_id}")
+
+    table_name = entry_def['table']
+    if table_name not in ('sales', 'purchases'):
+        raise ValueError("Multi-item entry is only supported for sales and purchases")
+    if not line_items:
+        raise ValueError("At least one product line item is required")
+
+    conn, mode = get_db_connection()
+    cursor = conn.cursor()
+    ph = _ph(mode)
+
+    try:
+        role = _lookup_user_role(cursor, mode, created_by)
+        is_admin = (role == 'admin')
+        now = datetime.now().isoformat(timespec='seconds')
+
+        if table_name == 'sales':
+            ref_no = shared_data.get('chalan_no') or get_next_chalan(client_id)
+        else:
+            ref_no = shared_data.get('input_invoice_no')
+            if not ref_no:
+                raise ValueError("Input Invoice No is required")
+
+        advance_total = float(shared_data.get('advance') or 0)
+
+        # Pass 1: compute each line's own total (and cost_price for sales)
+        # before touching the DB, so the grand total is known up front.
+        prepared = []
+        grand_total = 0.0
+        for li in line_items:
+            if table_name == 'sales':
+                qty = float(li.get('received_quantity') or 0)
+                price = float(li.get('sale_unit_price') or 0)
+                line_total = round(qty * price, 2)
+                provided_cost = li.get('cost_price')
+                if provided_cost in (None, "", 0, "0"):
+                    cost = _get_inventory_cost(cursor, mode, client_id, li.get('product_type'), li.get('size'))
+                else:
+                    cost = float(provided_cost)
+                prepared.append({**li, 'received_quantity': qty, 'sale_unit_price': price,
+                                  'sale_total_price': line_total, 'cost_price': cost})
+            else:
+                qty = float(li.get('quantity') or 0)
+                price = float(li.get('unit_price') or 0)
+                line_total = round(qty * price, 2)
+                prepared.append({**li, 'quantity': qty, 'unit_price': price, 'total': line_total})
+            grand_total += line_total
+        grand_total = round(grand_total, 2)
+
+        overall_due = round(max(0.0, grand_total - advance_total), 2)
+        overall_advance_applied = round(grand_total - overall_due, 2)
+
+        table_cols = {c['name'] for c in config['tables'][table_name]['columns']}
+        new_ids = []
+
+        for idx, li in enumerate(prepared):
+            insert_data = {'client_id': client_id}
+            insert_data.update(shared_data)
+            insert_data.update(li)
+
+            if table_name == 'sales':
+                insert_data['chalan_no'] = ref_no
+            else:
+                insert_data['input_invoice_no'] = ref_no
+
+            insert_data['advance'] = overall_advance_applied if idx == 0 else 0
+            insert_data['due'] = overall_due if idx == 0 else 0
+
+            insert_data['created_by'] = created_by
+            insert_data['status'] = 'authorized' if is_admin else 'pending'
+            insert_data['authorized_by'] = created_by if is_admin else None
+            insert_data['authorized_at'] = now if is_admin else None
+
+            # Coerce numeric-like fields (mirrors save_entry's own pass),
+            # skipping advance/due which are already deliberately set above.
+            for f in entry_def['fields']:
+                if f.get('type') == 'number' and f['name'] not in ('advance', 'due'):
+                    v = insert_data.get(f['name'])
+                    if v is None or v == "":
+                        insert_data[f['name']] = 0
+                    else:
+                        try:
+                            insert_data[f['name']] = float(v)
+                        except (TypeError, ValueError):
+                            insert_data[f['name']] = 0
+
+            insert_data = {k: v for k, v in insert_data.items() if k in table_cols}
+
+            cols = list(insert_data.keys())
+            vals = list(insert_data.values())
+            placeholders = ", ".join([ph] * len(cols))
+            cursor.execute(f"INSERT INTO {table_name} ({', '.join(cols)}) VALUES ({placeholders})", vals)
+            new_ids.append(cursor.lastrowid)
+
+            if table_name == 'purchases' and insert_data.get('status') == 'authorized':
+                _inventory_add_purchase(
+                    cursor, mode, client_id,
+                    insert_data.get('product_type'), insert_data.get('size'),
+                    float(insert_data.get('quantity') or 0), float(insert_data.get('unit_price') or 0),
+                )
+                if insert_data.get('product_type'):
+                    _upsert_product(
+                        cursor, mode, client_id, insert_data['product_type'],
+                        insert_data.get('size') or "", float(insert_data.get('unit_price') or 0),
+                    )
+            elif table_name == 'sales' and insert_data.get('status') == 'authorized':
+                _inventory_reduce_sale(
+                    cursor, mode, client_id,
+                    insert_data.get('product_type'), insert_data.get('size'),
+                    float(insert_data.get('received_quantity') or 0),
+                )
+
+        if mode == 'sqlite':
+            conn.commit()
+
+        result = {
+            "status": "success", "table": table_name, "ids": new_ids,
+            "line_count": len(new_ids), "entry_status": 'authorized' if is_admin else 'pending'
+        }
+        if table_name == 'sales':
+            result["chalan_no"] = ref_no
+        else:
+            result["input_invoice_no"] = ref_no
+        return result
+    finally:
+        conn.close()
+
+
 # ---------------- AUTHORIZATION ----------------
 def authorize_entry(table_name, record_id, authorized_by, client_id=None):
     if table_name not in ('sales', 'purchases'):
@@ -944,6 +1092,54 @@ def list_pending_transactions(client_id=None):
 
 
 DELETABLE_TABLES = ('products', 'inventory', 'customers', 'transporters', 'purchases', 'sales')
+
+# Master data with no derived/dependent fields (no totals, no inventory
+# side-effects, no authorization workflow) — a plain column update is safe.
+# Transaction tables (sales/purchases/etc.) are deliberately excluded since
+# editing their quantity/price after the fact would leave inventory and
+# due/advance out of sync with what was actually applied at save time.
+EDITABLE_TABLES = ('products', 'customers')
+
+
+def update_record(table_name, record_id, data, requested_by, client_id=None):
+    if table_name not in EDITABLE_TABLES:
+        raise ValueError(f"'{table_name}' records cannot be edited")
+
+    config = load_config()
+    if not client_id:
+        client_id = config['system'].get('default_client_id', 'CLI-001')
+
+    conn, mode = get_db_connection()
+    cursor = conn.cursor()
+    ph = _ph(mode)
+
+    try:
+        role = _lookup_user_role(cursor, mode, requested_by)
+        if role != 'admin':
+            raise ValueError("Only an admin can edit records")
+
+        cursor.execute(f"SELECT id FROM {table_name} WHERE id = {ph} AND client_id = {ph}", (record_id, client_id))
+        if not cursor.fetchone():
+            raise ValueError("Record not found")
+
+        table_cols = {c['name'] for c in config['tables'][table_name]['columns']}
+        editable_data = {k: v for k, v in data.items() if k in table_cols and k not in ('id', 'client_id')}
+        if not editable_data:
+            raise ValueError("Nothing to update")
+
+        sets = [f"{k} = {ph}" for k in editable_data]
+        params = list(editable_data.values()) + [record_id, client_id]
+        cursor.execute(
+            f"UPDATE {table_name} SET {', '.join(sets)} WHERE id = {ph} AND client_id = {ph}",
+            params
+        )
+
+        if mode == 'sqlite':
+            conn.commit()
+
+        return {"status": "success", "table": table_name, "id": record_id}
+    finally:
+        conn.close()
 
 
 def delete_entry(table_name, record_id, requested_by, client_id=None):
@@ -1259,13 +1455,26 @@ def get_invoice_data(invoice_id, client_id=None):
     )
     row = cursor.fetchone()
     sale_data = dict(row) if row and mode == 'sqlite' else (row if row else None)
-    conn.close()
 
     if not sale_data:
+        conn.close()
         return None
+
+    # A multi-product sale shares one chalan_no across several rows — the
+    # anchor row above (whichever the lookup happened to match) carries the
+    # shared invoice-level fields (buyer, date, advance, due, transport),
+    # while every row sharing that chalan_no is a product line item.
+    cursor.execute(
+        f"SELECT * FROM sales WHERE chalan_no = {ph} AND client_id = {ph} ORDER BY id ASC",
+        (sale_data['chalan_no'], client_id)
+    )
+    item_rows = cursor.fetchall()
+    items = [dict(r) for r in item_rows] if mode == 'sqlite' else list(item_rows)
+    conn.close()
 
     return {
         "sale": sale_data,
+        "items": items,
         "letterhead": get_letterhead_settings(),
         "system": config.get('system', {})
     }
