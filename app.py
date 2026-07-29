@@ -4,9 +4,8 @@ import sys
 import subprocess
 import webbrowser
 import threading
-import json
 from database import (
-    init_db, load_config, invalidate_config_cache, CONFIG_PATH,
+    init_db, load_config,
     save_entry, execute_report, get_invoice_data,
     authenticate_user, create_user, get_all_users,
     get_next_chalan, list_products, list_customers,
@@ -14,7 +13,8 @@ from database import (
     authorize_entry, list_pending_transactions,
     delete_entry, delete_user,
     adjust_entry, list_invoice_refs,
-    create_session_token, verify_session_token, revoke_session_token
+    create_session_token, verify_session_token, revoke_session_token,
+    get_letterhead_settings, save_letterhead_settings
 )
 
 
@@ -91,6 +91,7 @@ def api_get_config():
     public_config['database_config'] = {
         'mode': config.get('database_config', {}).get('mode', 'sqlite')
     }
+    public_config['letterhead'] = get_letterhead_settings()
     return jsonify(public_config)
 
 
@@ -336,15 +337,8 @@ def api_delete_user(user_id):
 def api_update_letterhead():
     try:
         new_letterhead = request.json or {}
-        with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
-            config = json.load(f)
-
-        config['letterhead'].update(new_letterhead)
-        with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
-            json.dump(config, f, indent=2)
-
-        invalidate_config_cache()
-        return jsonify({"status": "success", "letterhead": config['letterhead']})
+        updated = save_letterhead_settings(new_letterhead)
+        return jsonify({"status": "success", "letterhead": updated})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 400
 

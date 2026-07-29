@@ -168,6 +168,10 @@ def init_db():
     if mode == 'sqlite':
         conn.commit()
 
+    _ensure_letterhead_table(cursor, mode)
+    if mode == 'sqlite':
+        conn.commit()
+
     seed_admin_and_demo(conn, mode)
     conn.close()
     print(f"Database initialized in {mode.upper()} mode successfully!")
@@ -200,6 +204,135 @@ def _ensure_auth_tokens_table(cursor, mode):
                 expires_at VARCHAR(64) NOT NULL
             )
         """)
+
+
+def _ensure_letterhead_table(cursor, mode):
+    """Letterhead/business-pad settings (including the optional uploaded
+    pad image) live in the DB, not config.json. On a cloud host config.json
+    is a read-only Secret File, so writes to it (business pad edits) would
+    silently fail there — the DB is the only thing actually writable and
+    persistent across restarts/redeploys."""
+    if mode == 'sqlite':
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS letterhead_settings (
+                id INTEGER PRIMARY KEY,
+                company_name TEXT,
+                sub_heading TEXT,
+                address TEXT,
+                phone TEXT,
+                email TEXT,
+                footer_note TEXT,
+                header_height_px INTEGER,
+                show_border INTEGER,
+                use_pad_image INTEGER,
+                pad_image TEXT
+            )
+        """)
+    else:
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS letterhead_settings (
+                id INT PRIMARY KEY,
+                company_name TEXT,
+                sub_heading TEXT,
+                address TEXT,
+                phone TEXT,
+                email TEXT,
+                footer_note TEXT,
+                header_height_px INT,
+                show_border TINYINT,
+                use_pad_image TINYINT,
+                pad_image MEDIUMTEXT
+            )
+        """)
+
+    ph = _ph(mode)
+    cursor.execute("SELECT COUNT(*) as cnt FROM letterhead_settings WHERE id = 1")
+    row = cursor.fetchone()
+    exists = (row[0] if mode == 'sqlite' else row['cnt']) > 0
+    if not exists:
+        # One-time migration: seed from config.json's old letterhead block
+        # (if any) so upgrading doesn't blank out an already-configured pad.
+        old_lh = load_config().get('letterhead', {}) or {}
+        cursor.execute(
+            f"INSERT INTO letterhead_settings (id, company_name, sub_heading, address, phone, "
+            f"email, footer_note, header_height_px, show_border, use_pad_image, pad_image) "
+            f"VALUES ({ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph})",
+            (
+                1,
+                old_lh.get('company_name', ''),
+                old_lh.get('sub_heading', ''),
+                old_lh.get('address', ''),
+                old_lh.get('phone', ''),
+                old_lh.get('email', ''),
+                old_lh.get('footer_note', ''),
+                int(old_lh.get('header_height_px') or 140),
+                1 if old_lh.get('show_border', True) else 0,
+                0,
+                ''
+            )
+        )
+
+
+# Base64 pad images are capped here rather than in the frontend alone —
+# the frontend check is just a fast UX warning, this is the real guard
+# against an oversized upload bloating the letterhead_settings row.
+MAX_PAD_IMAGE_B64_CHARS = 8 * 1024 * 1024
+
+
+def get_letterhead_settings():
+    conn, mode = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM letterhead_settings WHERE id = 1")
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return {}
+    data = dict(row) if mode == 'sqlite' else dict(row)
+    data['show_border'] = bool(data.get('show_border', 1))
+    data['use_pad_image'] = bool(data.get('use_pad_image', 0))
+    return data
+
+
+def save_letterhead_settings(payload):
+    pad_image = payload.get('pad_image') or ''
+    if len(pad_image) > MAX_PAD_IMAGE_B64_CHARS:
+        raise ValueError("Pad image is too large — please use a smaller/compressed JPG or PNG.")
+
+    existing = get_letterhead_settings()
+    merged = {
+        'company_name': payload.get('company_name', existing.get('company_name', '')),
+        'sub_heading': payload.get('sub_heading', existing.get('sub_heading', '')),
+        'address': payload.get('address', existing.get('address', '')),
+        'phone': payload.get('phone', existing.get('phone', '')),
+        'email': payload.get('email', existing.get('email', '')),
+        'footer_note': payload.get('footer_note', existing.get('footer_note', '')),
+        'header_height_px': int(payload.get('header_height_px') or existing.get('header_height_px') or 140),
+        'show_border': payload.get('show_border', existing.get('show_border', True)),
+        'use_pad_image': payload.get('use_pad_image', existing.get('use_pad_image', False)),
+        'pad_image': pad_image if 'pad_image' in payload else existing.get('pad_image', ''),
+    }
+
+    conn, mode = get_db_connection()
+    cursor = conn.cursor()
+    ph = _ph(mode)
+    values = (
+        merged['company_name'], merged['sub_heading'], merged['address'],
+        merged['phone'], merged['email'], merged['footer_note'],
+        merged['header_height_px'],
+        1 if merged['show_border'] else 0,
+        1 if merged['use_pad_image'] else 0,
+        merged['pad_image'],
+    )
+    cursor.execute(
+        f"UPDATE letterhead_settings SET company_name={ph}, sub_heading={ph}, address={ph}, "
+        f"phone={ph}, email={ph}, footer_note={ph}, header_height_px={ph}, show_border={ph}, "
+        f"use_pad_image={ph}, pad_image={ph} WHERE id = 1",
+        values
+    )
+    if mode == 'sqlite':
+        conn.commit()
+    conn.close()
+    return get_letterhead_settings()
 
 
 def _migrate_missing_columns(cursor, mode, tables):
@@ -810,7 +943,7 @@ def list_pending_transactions(client_id=None):
     return {"purchases": purchases, "sales": sales}
 
 
-DELETABLE_TABLES = ('products', 'customers', 'transporters', 'purchases', 'sales')
+DELETABLE_TABLES = ('products', 'inventory', 'customers', 'transporters', 'purchases', 'sales')
 
 
 def delete_entry(table_name, record_id, requested_by, client_id=None):
@@ -1095,7 +1228,7 @@ def get_invoice_data(invoice_id, client_id=None):
 
     return {
         "sale": sale_data,
-        "letterhead": config.get('letterhead', {}),
+        "letterhead": get_letterhead_settings(),
         "system": config.get('system', {})
     }
 

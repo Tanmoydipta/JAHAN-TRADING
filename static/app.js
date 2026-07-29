@@ -715,6 +715,16 @@ async function renderReportView(reportId) {
 const DELETABLE_REPORT_TABLES = {
   sales_report: "sales",
   purchases_report: "purchases",
+  transporter_report: "transporters",
+  inventory_report: "inventory",
+  products_report: "products"
+};
+
+// Adjust (due date / advance delta) only makes sense for transaction tables
+// that actually have due/advance columns — not inventory or product prices.
+const ADJUSTABLE_REPORT_TABLES = {
+  sales_report: "sales",
+  purchases_report: "purchases",
   transporter_report: "transporters"
 };
 
@@ -740,9 +750,11 @@ async function loadReportData(reportId) {
     currentReportKeys = data.keys || [];
 
     const deleteTable = DELETABLE_REPORT_TABLES[reportId];
+    const adjustTable = ADJUSTABLE_REPORT_TABLES[reportId];
     const canDelete = deleteTable && currentPermissions && currentPermissions.can_delete;
-    const canAdjust = deleteTable && currentUser && currentUser.role === 'admin';
-    const showActions = canDelete || canAdjust;
+    const canAdjust = adjustTable && currentUser && currentUser.role === 'admin';
+    const canDownloadInvoice = reportId === 'sales_report';
+    const showActions = canDelete || canAdjust || canDownloadInvoice;
 
     const NUM_COLS = new Set(["qty","quantity","unit price","total","advance","due","rent","cost","price","amount","transport cost","profit","revenue","stock valuation","cost price","sale price"]);
     const theadTr = document.getElementById("reportTableHead");
@@ -784,8 +796,11 @@ async function loadReportData(reportId) {
           const td = document.createElement("td");
           td.style.whiteSpace = "nowrap";
           let html = "";
+          if (canDownloadInvoice) {
+            html += `<button class="btn btn-secondary" style="padding:4px 10px; font-size:11px; margin-right:6px;" onclick="openInvoiceModal('${row.chalan_no}')"><i class="fa-solid fa-file-invoice"></i> Invoice</button>`;
+          }
           if (canAdjust) {
-            html += `<button class="btn btn-secondary" style="padding:4px 10px; font-size:11px; margin-right:6px;" onclick="openAdjustModal('${deleteTable}', ${row.id})"><i class="fa-solid fa-pen"></i> Adjust</button>`;
+            html += `<button class="btn btn-secondary" style="padding:4px 10px; font-size:11px; margin-right:6px;" onclick="openAdjustModal('${adjustTable}', ${row.id})"><i class="fa-solid fa-pen"></i> Adjust</button>`;
           }
           if (canDelete) {
             html += `<button class="btn btn-secondary" style="padding:4px 10px; font-size:11px; color:var(--accent-rose);" onclick="deleteReportRecord('${deleteTable}', ${row.id}, '${reportId}')"><i class="fa-solid fa-trash"></i> Delete</button>`;
@@ -1098,15 +1113,32 @@ async function openInvoiceModal(invoiceRef) {
     const ribbon = document.getElementById("padPendingRibbon");
     if (ribbon) ribbon.style.display = sale.status === "pending" ? "block" : "none";
 
-    if (lh.show_border === false) {
+    const padDivider = document.getElementById("padDividerLine");
+
+    if (lh.use_pad_image && lh.pad_image) {
+      // The uploaded pad image IS the page — invoice content prints as an
+      // overlay on top of it (like text on a pre-printed letterhead sheet),
+      // not as a separate block stacked above/below the artwork.
+      padPaper.style.backgroundImage = `url('${lh.pad_image}')`;
+      padPaper.style.backgroundSize = "100% 100%";
+      padPaper.style.backgroundRepeat = "no-repeat";
       headerArea.style.display = "none";
+      if (padDivider) padDivider.style.display = "none";
       padPaper.style.paddingTop = `${lh.header_height_px || 140}px`;
     } else {
-      headerArea.style.display = "block";
-      padPaper.style.paddingTop = "40px";
-      document.getElementById("padCompanyTitle").innerText = lh.company_name || "";
-      document.getElementById("padSubHeading").innerText = lh.sub_heading || "";
-      document.getElementById("padContactLine").innerText = `${lh.address || ''} | Phone: ${lh.phone || ''}`;
+      padPaper.style.backgroundImage = "none";
+      if (padDivider) padDivider.style.display = "";
+
+      if (lh.show_border === false) {
+        headerArea.style.display = "none";
+        padPaper.style.paddingTop = `${lh.header_height_px || 140}px`;
+      } else {
+        headerArea.style.display = "block";
+        padPaper.style.paddingTop = "40px";
+        document.getElementById("padCompanyTitle").innerText = lh.company_name || "";
+        document.getElementById("padSubHeading").innerText = lh.sub_heading || "";
+        document.getElementById("padContactLine").innerText = `${lh.address || ''} | Phone: ${lh.phone || ''}`;
+      }
     }
 
     document.getElementById("padCustName").innerText = sale.buyer_name || "-";
@@ -1163,6 +1195,9 @@ function closeInvoiceModal() {
 }
 
 // ---------------- LETTERHEAD ----------------
+let currentPadImageDataUrl = "";
+const MAX_PAD_IMAGE_BYTES = 6 * 1024 * 1024;
+
 function populateLetterheadForm() {
   if (!systemConfig || !systemConfig.letterhead) return;
   const lh = systemConfig.letterhead;
@@ -1174,6 +1209,45 @@ function populateLetterheadForm() {
   document.getElementById("lhFooterNote").value = lh.footer_note || "";
   document.getElementById("lhHeaderHeight").value = lh.header_height_px || 140;
   document.getElementById("lhShowBorder").value = lh.show_border !== false ? "true" : "false";
+  document.getElementById("lhUsePadImage").checked = !!lh.use_pad_image;
+
+  currentPadImageDataUrl = lh.pad_image || "";
+  updatePadImagePreview();
+}
+
+function updatePadImagePreview() {
+  const wrap = document.getElementById("lhPadImagePreviewWrap");
+  const img = document.getElementById("lhPadImagePreview");
+  if (currentPadImageDataUrl) {
+    img.src = currentPadImageDataUrl;
+    wrap.style.display = "flex";
+  } else {
+    img.src = "";
+    wrap.style.display = "none";
+  }
+}
+
+function handlePadImageSelected(event) {
+  const file = event.target.files && event.target.files[0];
+  if (!file) return;
+  if (file.size > MAX_PAD_IMAGE_BYTES) {
+    alert("That image is too large (max 6 MB). Please use a smaller or compressed JPG/PNG.");
+    event.target.value = "";
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = () => {
+    currentPadImageDataUrl = reader.result;
+    updatePadImagePreview();
+  };
+  reader.readAsDataURL(file);
+}
+
+function removePadImage() {
+  currentPadImageDataUrl = "";
+  document.getElementById("lhPadImageFile").value = "";
+  document.getElementById("lhUsePadImage").checked = false;
+  updatePadImagePreview();
 }
 
 async function saveLetterheadSettings(event) {
@@ -1186,7 +1260,9 @@ async function saveLetterheadSettings(event) {
     email: document.getElementById("lhEmail").value,
     footer_note: document.getElementById("lhFooterNote").value,
     header_height_px: parseInt(document.getElementById("lhHeaderHeight").value || 140),
-    show_border: document.getElementById("lhShowBorder").value === "true"
+    show_border: document.getElementById("lhShowBorder").value === "true",
+    use_pad_image: document.getElementById("lhUsePadImage").checked,
+    pad_image: currentPadImageDataUrl
   };
   try {
     const res = await apiFetch("/api/letterhead", {

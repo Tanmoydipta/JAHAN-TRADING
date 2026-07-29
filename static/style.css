@@ -647,6 +647,10 @@ input[readonly] { background: rgba(255,255,255,0.02) !important; color: var(--te
   overflow-y: auto;
   font-family: 'Outfit', sans-serif;
   line-height: 1.4;
+  /* Without this, browsers omit CSS background-images from printed output
+     by default — silently dropping an uploaded pad image at print time. */
+  -webkit-print-color-adjust: exact;
+  print-color-adjust: exact;
 }
 
 .pad-header { text-align: center; }
