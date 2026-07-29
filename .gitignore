@@ -1,0 +1,33 @@
+# Local SQLite leftover (live mode uses Aiven MySQL)
+jahan_trading.db
+
+# PyInstaller build/dist outputs — not needed once the app is hosted, not the exe
+build/
+dist/
+JahanTradingSystem/
+exe_run.log
+
+# Python
+__pycache__/
+*.pyc
+
+# graphify analysis cache — regenerated locally, not deployment-relevant
+graphify-out/
+
+# Android build outputs
+android-app/.gradle/
+android-app/app/build/
+android-app/app/release/
+android-app/app/debug/
+android-app/build/
+android-app/local.properties
+android-app/.idea/
+android-app/.artifacts/
+
+# Editor/tooling
+.claude/
+
+# Live secrets — see config.json.example instead. This file holds the real
+# Aiven DB host/user/password; it must never enter git history.
+config.json
+

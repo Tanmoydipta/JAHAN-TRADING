@@ -1,0 +1,127 @@
+================================================================================
+  JAHAN TRADING SYSTEM - RESALE QUICK REFERENCE
+================================================================================
+
+SELLING ONE COPY? FOLLOW THIS WORKFLOW:
+
+1. GET CUSTOMER'S INFO
+   □ Company name, address, phone, email
+   □ Their cloud database details (host, username, password, database name)
+     (They should sign up for Aiven free tier or DigitalOcean $15/mo)
+
+2. GENERATE CONFIG
+   $ python generate_customer_config.py
+   → Interactive script → outputs config_CustomerName.json
+
+3. SWAP CONFIG
+   Copy/paste contents of config_CustomerName.json into:
+     dist/JahanTradingSystem/_internal/config.json
+
+4. TEST (5 min)
+   □ Double-click dist/JahanTradingSystem/JahanTradingSystem.exe
+   □ Wait for browser login screen
+   □ Login: admin / admin123
+   □ Check sidebar shows "MYSQL Connected"
+   □ Close browser
+
+5. SHIP TO CUSTOMER
+   □ ZIP the entire dist/JahanTradingSystem/ folder
+   □ Send via email, download link, or USB drive
+   □ Include: CUSTOMER_SETUP_INSTRUCTIONS (see RESALE_DEPLOYMENT_GUIDE.md)
+
+6. SUPPORT
+   □ Customer runs exe → logs in with admin/admin123
+   □ They change password in "User & Password Setup"
+   □ They customize company details in "Business Pad Setup"
+   □ You're done! (except future bug fixes = rebuild + redistribute)
+
+================================================================================
+
+DEPLOYMENT CHECKLIST PER CUSTOMER:
+
+Customer Name: ________________________    Date: ________
+
+□ Collected branding info (company, address, phone, email)
+□ Collected database connection details (host, user, password, DB name)
+□ Ran generate_customer_config.py ← (config_*.json created)
+□ Copied config to dist/JahanTradingSystem/_internal/config.json
+□ Tested locally (exe starts, login works, DB connected)
+□ Created ZIP file: dist/JahanTradingSystem/
+□ Uploaded ZIP to hosting (Google Drive, Dropbox, web server)
+□ Sent download link to customer
+□ Included setup instructions (see RESALE_DEPLOYMENT_GUIDE.md)
+□ Awaiting customer feedback / support requests
+
+Notes:
+_____________________________________________________________________________
+_____________________________________________________________________________
+_____________________________________________________________________________
+
+================================================================================
+
+DATABASE PROVIDER RECOMMENDATIONS FOR CUSTOMERS:
+
+→ START: Aiven Free Tier
+  ✓ $0/mo forever
+  ✓ 1GB storage, 1GB RAM
+  ✗ Single node (no failover)
+  ✗ Auto-sleeps after inactivity (needs manual wake)
+  Sign up: https://aiven.io/free-mysql-database
+  Gets them going with zero cost.
+
+→ UPGRADE: DigitalOcean Managed MySQL
+  ✓ $15/mo flat rate, predictable
+  ✓ Multi-node options, automatic failover
+  ✓ 24/7 uptime SLA
+  ✗ Not free
+  Sign up: https://www.digitalocean.com/
+  Recommend if customer hits 1GB limit or needs reliability.
+
+================================================================================
+
+TROUBLESHOOTING QUICK REFERENCE:
+
+Issue: "No module named flask"
+→ Exe was built with Python 3.12 which has no Flask installed.
+→ Solution: Rebuild exe using Python 3.14+
+  $ C:\Python314\python.exe build.py
+
+Issue: Database connection fails
+→ Customer's MySQL is unreachable.
+→ Ask them to:
+   1. Check cloud provider dashboard (DB is running?)
+   2. Verify hostname/username/password (exact match?)
+   3. Check firewall rules in cloud provider (your IP allowed?)
+   4. Re-test connection string manually if possible
+
+Issue: App is slow
+→ Normal over internet. Aiven free tier is especially slow.
+→ Recommend upgrading to DigitalOcean or local MySQL.
+
+Issue: Duplicate Chalan numbers / data corruption
+→ This is not a known issue. Ask for detailed steps to reproduce.
+→ Check database logs in cloud provider's dashboard.
+
+================================================================================
+
+CUSTOMIZATION BEYOND CONFIG.JSON:
+
+To resell with your own branding (not "JAHAN TRADING SYSTEM"):
+
+1. Modify RESALE_DEPLOYMENT_GUIDE.md → your company name
+2. Edit static/index.html → your company logo/branding (optional)
+3. Rebuild exe: python build.py (use Python 3.14+)
+4. Create new ZIP of dist/JahanTradingSystem/
+5. Use config generator as-is (only config changes per customer)
+
+================================================================================
+
+ANNUAL CHECKLIST:
+
+□ Update build.py Python version if Python 4.0+ is released
+□ Review dependencies for security patches (Flask, PyMySQL, etc.)
+□ Test exe on fresh Windows VM to ensure compatibility
+□ Archive old customer configs securely (encrypted, offline backup)
+□ Review customer feedback for common issues / feature requests
+
+================================================================================
