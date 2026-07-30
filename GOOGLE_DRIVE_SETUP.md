@@ -12,108 +12,124 @@ The same one-time setup below powers **two** features:
    Aiven MySQL storage small — a full image can be several MB, but the link
    saved in the database is just a few bytes.
 
-Both use a **service account** (a robot Google identity, not your personal
-login) so no one has to click through a Google sign-in screen — it works the
-same on your desktop exe and on Render.
+**This uses OAuth as your own Google account** — not a service account.
+(We tried a service account first; Google rejected it with `Service Accounts
+do not have storage quota` — that's a hard Google rule for personal/free
+Drive accounts, only lifted inside a paid Google Workspace "Shared Drive."
+OAuth as your own account avoids that entirely.) The tradeoff is a one-time
+browser sign-in step (Step 6 below) instead of a fully silent setup — after
+that, it's just as automatic.
 
-Everything lands in **one shared "Challans" folder** that you control (the
-pad image reuses this same folder — there's nothing extra to set up for it).
-
-You only have to do this once. Follow the steps in order.
+Everything lands in **one shared folder** in your own Drive that you
+control (the pad image reuses this same folder).
 
 ---
 
-## Step 1 — Create a Google Cloud project
+## Step 1 — Create a Google Cloud project ✅ (done)
 
-1. Go to https://console.cloud.google.com/ and sign in with your Google account.
-2. Click the project dropdown (top left, next to "Google Cloud") → **New Project**.
-3. Name it something like `jahan-trading-drive` → **Create**.
-4. Wait a few seconds for it to finish, then make sure it's selected in the
-   project dropdown at the top.
+## Step 2 — Enable the Google Drive API ✅ (done)
 
-## Step 2 — Enable the Google Drive API
+## Step 3 — Configure the OAuth consent screen
 
-1. In the search bar at the top, type **"Google Drive API"** and open it.
-2. Click **Enable**.
+1. In the left sidebar: **APIs & Services → OAuth consent screen**.
+2. User Type: **External** → **Create**.
+3. Fill in the required fields: App name (e.g. `Jahan Trading Drive`), your
+   email as the User support email, your email again as the Developer
+   contact. Everything else can stay blank → **Save and Continue**.
+4. On the **Scopes** step, click **Add or Remove Scopes**, search for
+   `drive.file`, check the one described as *"See, edit, create, and delete
+   only the specific Google Drive files you use with this app"* → **Update**
+   → **Save and Continue**. (Deliberately narrow — the app only ever
+   uploads new files, never touches your other Drive content, and this
+   narrower scope is why you won't hit Google's app-verification process.)
+5. On the **Test users** step, click **Add Users** and add your own Google
+   account's email → **Save and Continue**.
+6. Review and click **Back to Dashboard**.
 
-## Step 3 — Create the service account
+## Step 4 — Create the OAuth Client ID
 
-1. In the left sidebar: **APIs & Services → Credentials**.
-2. Click **+ Create Credentials → Service account**.
-3. Give it a name, e.g. `jahan-challan-uploader`. Click **Create and Continue**.
-4. On the "Grant this service account access to project" step, you can click
-   **Continue** without picking a role (we'll share a specific folder with it
-   instead — that's more secure than project-wide access).
-5. Click **Done**.
+1. Left sidebar: **APIs & Services → Credentials**.
+2. Click **+ Create Credentials → OAuth client ID**.
+3. Application type: **Desktop app**. Name it anything, e.g. `Jahan Trading Desktop`.
+4. Click **Create**. A dialog pops up — click **Download JSON**.
+5. Rename the downloaded file to `oauth_client_secret.json` and place it in
+   the project's root folder (next to `config.json`).
 
-## Step 4 — Generate the JSON key
+## Step 5 — Create the Drive folder
 
-1. You'll now see the service account in the Credentials list. Click on it.
-2. Go to the **Keys** tab → **Add Key → Create new key**.
-3. Choose **JSON** → **Create**. A `.json` file downloads automatically —
-   this is the only copy Google gives you, so keep it safe (treat it like a
-   password: never commit it to a public git repo, never share it).
-4. Note the service account's **email address** shown on this page — it looks
-   like `jahan-challan-uploader@jahan-trading-drive.iam.gserviceaccount.com`.
-   You'll need it in the next step.
-
-## Step 5 — Create the shared Drive folder and share it with the service account
-
-1. Go to https://drive.google.com (your normal Google Drive, in your own account).
+1. Go to https://drive.google.com (your normal Google Drive).
 2. Create a new folder, e.g. **"Challans"**.
-3. Right-click it → **Share** → paste in the service account's email address
-   from Step 4 → give it **Editor** access → **Send** (it's fine that it's a
-   robot account, not a real person — Drive will let you share with it).
-4. Open the folder and copy its **folder ID** from the URL:
+3. Open it and copy its **folder ID** from the URL:
    `https://drive.google.com/drive/folders/`**`THIS_PART_IS_THE_ID`**
-
-## Step 6 — Wire it into the app
-
-1. Rename the downloaded JSON key file to `service_account.json` and place it
-   in the project's root folder (next to `config.json` and `ca.pem`).
-2. Open `config.json` and fill in the `google_drive` block:
+4. Paste it into `config.json`:
    ```json
    "google_drive": {
-     "service_account_key_path": "service_account.json",
-     "challans_folder_id": "PASTE_THE_FOLDER_ID_FROM_STEP_5_HERE"
+     "oauth_client_secret_path": "oauth_client_secret.json",
+     "oauth_token_path": "drive_token.json",
+     "challans_folder_id": "PASTE_THE_FOLDER_ID_HERE"
    }
    ```
-3. Restart the app (`python app.py`, or restart the packaged exe).
-4. Go to **Sales Report** → click **Challan** on any row → pick a photo. It
+   (No sharing step needed this time — it's your own account uploading into
+   your own folder.)
+
+## Step 6 — Run the one-time authorization
+
+From the project folder, run:
+```bash
+python authorize_google_drive.py
+```
+This opens your browser to a Google sign-in/consent screen (you'll likely
+see an "unverified app" warning since this is your own personal-use app —
+click **Advanced → Go to (app name) (unsafe)**, this is expected and safe
+since it's your own app). Approve access. The script saves a `drive_token.json`
+file in the project folder and prints a success message.
+
+**That's the only manual sign-in you'll ever need to do** — the app reuses
+and auto-refreshes this token from then on.
+
+## Step 7 — Try it
+
+1. Restart the app (`python app.py`, or restart the packaged exe).
+2. Go to **Sales Report** → click **Challan** on any row → pick a photo. It
    should upload and a **View File** link will appear in that row's "Challan
    File" column.
-5. Go to **Business Pad Setup** → pick a pad image → **Save Business Pad
-   Settings**. The image uploads to the same Drive folder at save time (not
-   the moment you pick the file), and only the resulting link is stored —
-   check `config.json`'s folder afterward and you'll see a file named
-   `letterhead_pad.jpg`/`.png` there.
+3. Go to **Business Pad Setup** → pick a pad image → **Save Business Pad
+   Settings**. The image uploads to the Drive folder at save time (not the
+   moment you pick the file), and only the resulting link is stored.
 
 ---
 
 ## If you're deploying to Render
 
 Render's filesystem is read-only for anything committed to the repo, and you
-should **never commit `service_account.json` to git** (it's a credential).
-Instead:
+should **never commit `oauth_client_secret.json` or `drive_token.json` to
+git** (both are credentials — `drive_token.json` in particular grants
+ongoing upload access without needing to sign in again).
 
 1. In the Render dashboard → your service → **Environment → Secret Files**.
-2. Add a Secret File with filename `service_account.json` and paste the full
-   contents of the downloaded JSON key as its value.
-3. Render mounts it at `/etc/secrets/service_account.json` — update
-   `config.json`'s `service_account_key_path` to that full path (this is the
-   same pattern already used for `ca.pem`/the database credentials on Render;
-   see `DEPLOYMENT.md`).
+2. Add two Secret Files: `oauth_client_secret.json` and `drive_token.json`
+   (paste each file's full contents as its value — run Step 6 locally first
+   to generate `drive_token.json`, since Render can't open a browser for you).
+3. Render mounts them at `/etc/secrets/...` — update `config.json`'s
+   `oauth_client_secret_path`/`oauth_token_path` to those full paths (same
+   pattern already used for `ca.pem`/the database credentials on Render; see
+   `DEPLOYMENT.md`).
 
 ## Troubleshooting
 
-- **"Google Drive is not configured yet"** — `service_account_key_path` is
-  missing or the file isn't at that path.
-- **"Google Drive challans folder is not configured"** — `challans_folder_id`
-  is blank in `config.json`.
-- **403 / permission errors on upload** — the folder wasn't actually shared
-  with the service account's email address (Step 5), or it was shared as
-  "Viewer" instead of "Editor".
-- Uploaded files not visible in your normal Drive view — that's expected if
-  you look at "My Drive" instead of the shared "Challans" folder itself;
-  files created by the service account live inside that folder, open the
-  folder directly (or the "Shared with me" view) to see them.
+- **"Google Drive isn't authorized yet"** — run `python authorize_google_drive.py`
+  (Step 6).
+- **"Google Drive authorization has expired or was revoked"** — run
+  `python authorize_google_drive.py` again. This can happen if you revoke
+  access from your Google Account's security settings, or if the token file
+  is deleted/moved.
+- **"Google Drive folder is not configured"** — `challans_folder_id` is
+  blank in `config.json`.
+- **"Service Accounts do not have storage quota" / 403 storageQuotaExceeded**
+  — this means something is still pointed at the old service-account
+  approach; make sure `config.json`'s `google_drive` block matches Step 5
+  above (oauth_client_secret_path/oauth_token_path, not
+  service_account_key_path).
+- The "Google hasn't verified this app" warning during Step 6 is expected
+  and safe to click through (**Advanced → Go to ... (unsafe)**) — it's your
+  own app, using a narrow scope that only touches files it creates itself.

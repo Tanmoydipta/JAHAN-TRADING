@@ -31,3 +31,10 @@ android-app/.artifacts/
 # Aiven DB host/user/password; it must never enter git history.
 config.json
 
+# Google Drive OAuth credentials — both are secrets, never commit them.
+# service_account.json is the old (non-working, service-account) approach's
+# leftover key file — harmless to keep gitignored even though it's unused now.
+service_account.json
+oauth_client_secret.json
+drive_token.json
+

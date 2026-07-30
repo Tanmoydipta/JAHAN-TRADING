@@ -1,74 +1,91 @@
-"""Google Drive upload helper for the Sales Report's challan-file attachment.
+"""Google Drive upload helper for the Sales Report's challan-file attachment
+and the Business Pad Setup's letterhead image.
 
-Uses a service account (not per-user OAuth) so uploads work headlessly from
-the Flask app with no browser consent step. See GOOGLE_DRIVE_SETUP.md for the
-one-time setup: create the Google Cloud project, enable the Drive API,
-generate the service-account JSON key, and share the destination folder with
-the service account's email address.
+Uses OAuth as the business owner's *own* Google account — not a service
+account. Service accounts have no storage quota of their own and cannot use
+a personal Google Drive's quota either (Google only allows that inside a
+paid Google Workspace "Shared Drive"), so for a normal personal/free Google
+account, uploading has to happen as the real account.
+
+One-time setup: run `python authorize_google_drive.py` locally to complete
+a browser sign-in once; it saves a reusable token file
+(`google_drive.oauth_token_path` in config.json, default 'drive_token.json')
+so the app never has to ask again (access tokens refresh automatically using
+the saved refresh token). See GOOGLE_DRIVE_SETUP.md for the full walkthrough.
 """
 import io
 import os
 
 from database import load_config
 
+SCOPES = ['https://www.googleapis.com/auth/drive.file']
+
+
+def _resolve_path(path):
+    if not path:
+        return path
+    if os.path.isabs(path):
+        return path
+    return os.path.join(os.path.dirname(__file__), path)
+
 
 def _get_drive_service():
     try:
-        from google.oauth2 import service_account
+        from google.auth.transport.requests import Request
+        from google.oauth2.credentials import Credentials
         from googleapiclient.discovery import build
     except ImportError:
         raise ValueError(
-            "Google Drive upload requires the 'google-api-python-client' and "
-            "'google-auth' packages. Run: pip install -r requirements.txt"
+            "Google Drive upload requires the 'google-api-python-client', 'google-auth' "
+            "and 'google-auth-oauthlib' packages. Run: pip install -r requirements.txt"
         )
 
     config = load_config()
     drive_cfg = config.get('google_drive', {})
-    key_path = drive_cfg.get('service_account_key_path')
-    if not key_path:
-        raise ValueError(
-            "Google Drive is not configured yet — set 'google_drive.service_account_key_path' "
-            "in config.json. See GOOGLE_DRIVE_SETUP.md."
-        )
-
-    resolved = key_path
-    if not os.path.isabs(resolved):
-        resolved = os.path.join(os.path.dirname(__file__), resolved)
-    if not os.path.exists(resolved):
-        raise FileNotFoundError(
-            f"Google service account key not found at '{resolved}'. Follow "
-            f"GOOGLE_DRIVE_SETUP.md to create one, then place the downloaded JSON "
-            f"key file there (or update 'google_drive.service_account_key_path' in config.json)."
-        )
 
     folder_id = drive_cfg.get('challans_folder_id')
     if not folder_id:
         raise ValueError(
-            "Google Drive challans folder is not configured — paste the shared "
-            "folder's ID into 'google_drive.challans_folder_id' in config.json. "
-            "See GOOGLE_DRIVE_SETUP.md."
+            "Google Drive folder is not configured — paste the shared folder's ID into "
+            "'google_drive.challans_folder_id' in config.json. See GOOGLE_DRIVE_SETUP.md."
         )
 
-    creds = service_account.Credentials.from_service_account_file(
-        resolved, scopes=['https://www.googleapis.com/auth/drive']
-    )
+    token_path = _resolve_path(drive_cfg.get('oauth_token_path', 'drive_token.json'))
+    if not os.path.exists(token_path):
+        raise ValueError(
+            "Google Drive isn't authorized yet — run 'python authorize_google_drive.py' once "
+            "from the project folder to complete the one-time Google sign-in. See GOOGLE_DRIVE_SETUP.md."
+        )
+
+    creds = Credentials.from_authorized_user_file(token_path, SCOPES)
+    if not creds.valid:
+        if creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+            with open(token_path, 'w', encoding='utf-8') as f:
+                f.write(creds.to_json())
+        else:
+            raise ValueError(
+                "Google Drive authorization has expired or was revoked — run "
+                "'python authorize_google_drive.py' again to re-authorize. See GOOGLE_DRIVE_SETUP.md."
+            )
+
     service = build('drive', 'v3', credentials=creds, cache_discovery=False)
     return service, folder_id
 
 
 def upload_file_to_drive(file_bytes, filename, mime_type, make_public=False):
-    """Uploads a file into the configured shared Drive folder.
+    """Uploads a file into the configured shared Drive folder, as the
+    authorized user's own Google account.
 
-    make_public=False (challans): the folder is already shared with the
-    business owner's own Google account (they created it), so a plain
-    webViewLink is enough for them to open it manually — no need to widen
-    access beyond that.
+    make_public=False (challans): the file lands in the business owner's own
+    Drive folder — they can already see it directly as the owner, no need to
+    widen access.
 
-    make_public=True (letterhead pad image): the browser has to load this
-    as a plain <img>/background-image for *any* logged-in staff member
-    printing an invoice, which requires the file to be fetchable without a
-    Google login — so we explicitly grant "anyone with the link, viewer"
-    and return the direct-content URL format instead of the view-page link.
+    make_public=True (letterhead pad image): the browser has to load this as
+    a plain <img>/background-image for *any* logged-in staff member printing
+    an invoice, which requires the file to be fetchable without a Google
+    login — so we explicitly grant "anyone with the link, viewer" and return
+    the direct-content URL format instead of the view-page link.
     """
     from googleapiclient.http import MediaIoBaseUpload
 

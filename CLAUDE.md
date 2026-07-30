@@ -54,7 +54,7 @@ Config is cached in-memory with mtime-based invalidation (`load_config()` / `inv
 - `GET /api/quotation_refs?client_id=` — approved quotations available to link into a Sales Entry
 - `GET /api/quotation/<quotation_no>?client_id=` — quotation header + line items, used both for the print pad and Sales Entry auto-fill
 - `POST /api/quotation/<quotation_no>/approve` — admin-only, flips every row sharing that quotation_no to `status='approved'`
-- `POST /api/sales/<chalan_no>/challan` — multipart file upload; pushes the file to Google Drive (service account) and records the link in `challan_uploads`
+- `POST /api/sales/<chalan_no>/challan` — multipart file upload; pushes the file to Google Drive (OAuth, as the business owner's own account) and records the link in `challan_uploads`
 
 ## Report system (config.json → `report_points`)
 
@@ -180,10 +180,13 @@ Both print pads share `applyPadBackground()` (`app.js`) so their header/footer/s
 
 ## Google Drive integration (challan uploads + letterhead pad image)
 
-Two features push files to a **shared Google Drive folder** via a service account (not per-user OAuth — no browser consent step, works headlessly on Render or the packaged exe). See `GOOGLE_DRIVE_SETUP.md` for the full one-time setup walkthrough.
+Two features push files to a **shared Google Drive folder** using OAuth as the business owner's own Google account — **not a service account**. A service account was tried first and rejected by Google at upload time with `403 storageQuotaExceeded: Service Accounts do not have storage quota` — service accounts have no Drive storage of their own and can't borrow a personal account's quota either; that's only possible inside a paid Google Workspace "Shared Drive." OAuth as the real account sidesteps this since the app uploads with the actual account's own quota. See `GOOGLE_DRIVE_SETUP.md` for the full one-time setup walkthrough (OAuth consent screen, OAuth client, and a one-time browser sign-in via `authorize_google_drive.py`).
 
-- Config: `config.json → google_drive` = `{"service_account_key_path": ..., "challans_folder_id": ...}` (server-side only, never exposed via `/api/config`, same pattern as `database_config`). Both features currently reuse the same one configured folder.
-- `google_drive.py` — `upload_file_to_drive(file_bytes, filename, mime_type, make_public=False)` is the shared primitive; `upload_challan_to_drive()` and `upload_letterhead_pad_image()` are thin wrappers over it. Imports of `google-api-python-client`/`google-auth` are lazy (inside the function) so a missing install doesn't break app startup, only the upload call. Raises `ValueError`/`FileNotFoundError` with actionable setup instructions if the key file or folder ID is missing.
+- Config: `config.json → google_drive` = `{"oauth_client_secret_path": ..., "oauth_token_path": ..., "challans_folder_id": ...}` (server-side only, never exposed via `/api/config`, same pattern as `database_config`). Both features reuse the same one configured folder.
+- **Scope is deliberately narrow**: `https://www.googleapis.com/auth/drive.file` (can only see/manage files the app itself created) — this is a non-sensitive scope that doesn't require Google's app-verification review, unlike full Drive access.
+- `authorize_google_drive.py` (project root) — a standalone one-time script (`python authorize_google_drive.py`) that runs `InstalledAppFlow.run_local_server()`, opens the browser for the owner to sign in and approve, and saves the resulting token to `oauth_token_path` (default `drive_token.json`). This is the **only manual step** — everything after that is silent; `google_drive.py`'s `_get_drive_service()` auto-refreshes the access token from the saved refresh token and rewrites the token file when it does.
+- `google_drive.py` — `upload_file_to_drive(file_bytes, filename, mime_type, make_public=False)` is the shared primitive; `upload_challan_to_drive()` and `upload_letterhead_pad_image()` are thin wrappers over it. Imports of `google-api-python-client`/`google-auth`/`google-auth-oauthlib` are lazy (inside the function) so a missing install doesn't break app startup, only the upload call. Raises `ValueError` with actionable setup instructions (which script to run) if the token file, client secret, or folder ID is missing.
+- `service_account.json` may still exist in the project folder as a leftover from the earlier (non-working) approach — it's unused and harmless, still gitignored.
 
 **Sales Report → Upload Challan** (`promptChallanUpload()` in `app.js`, `POST /api/sales/<chalan_no>/challan`):
 - Files are named `{chalan_no}_{buyer_name}_{sale_date}.{ext}` and all land in the shared folder (not per-invoice subfolders). Uploaded with `make_public=False` — the folder is already shared with the business owner's own Google account (they created it), so a plain `webViewLink` is enough.
@@ -240,7 +243,7 @@ A single Sales or Purchase transaction can now include multiple product line ite
 - `jahan_trading.db` in the project root is a local SQLite leftover from earlier local-mode testing; irrelevant while `mode: mysql` is active.
 - Flask dev server (`app.run(debug=False)`) is used directly — fine for a single-client desktop-style exe, not hardened for concurrent/public use.
 - `app.py` auto-opens the user's default browser 1.2s after the server starts (`threading.Timer` → `webbrowser.open_new`).
-- Google Drive integration (challan uploads + letterhead pad image) is code-complete but **not yet live** — `service_account.json`/`challans_folder_id` haven't been provisioned yet (see `GOOGLE_DRIVE_SETUP.md`); until then, both the Upload Challan button and saving a new pad image fail with a clear "not configured" message instead of erroring obscurely.
+- Google Drive integration (challan uploads + letterhead pad image) requires the one-time `python authorize_google_drive.py` sign-in (see `GOOGLE_DRIVE_SETUP.md`) before it works; until then, both the Upload Challan button and saving a new pad image fail with a clear "not authorized yet" message instead of erroring obscurely.
 - `saveElementAsPDF()`'s client-side PDF capture may render the pad **without** its background image once that image is Drive-hosted, if Drive doesn't send permissive-enough CORS headers for the canvas read — Print is unaffected (see Print/Save section above).
 - `list_products()` previously omitted the `origin` column entirely (a pre-existing bug, unrelated to whoever added the column) — fixed during the quotations work since the quotation line-item auto-fill depends on it.
 
