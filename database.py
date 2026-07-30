@@ -223,6 +223,7 @@ def _ensure_letterhead_table(cursor, mode):
                 email TEXT,
                 footer_note TEXT,
                 header_height_px INTEGER,
+                footer_height_px INTEGER,
                 show_border INTEGER,
                 use_pad_image INTEGER,
                 pad_image TEXT
@@ -239,11 +240,26 @@ def _ensure_letterhead_table(cursor, mode):
                 email TEXT,
                 footer_note TEXT,
                 header_height_px INT,
+                footer_height_px INT,
                 show_border TINYINT,
                 use_pad_image TINYINT,
                 pad_image MEDIUMTEXT
             )
         """)
+
+    # Older installs created this table before footer_height_px existed.
+    if mode == 'sqlite':
+        cursor.execute("PRAGMA table_info(letterhead_settings)")
+        existing_cols = {row[1] for row in cursor.fetchall()}
+    else:
+        cursor.execute(
+            "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+            "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'letterhead_settings'"
+        )
+        existing_cols = {row['COLUMN_NAME'] for row in cursor.fetchall()}
+    if 'footer_height_px' not in existing_cols:
+        col_type = 'INTEGER' if mode == 'sqlite' else 'INT'
+        cursor.execute(f"ALTER TABLE letterhead_settings ADD COLUMN footer_height_px {col_type}")
 
     ph = _ph(mode)
     cursor.execute("SELECT COUNT(*) as cnt FROM letterhead_settings WHERE id = 1")
@@ -255,8 +271,8 @@ def _ensure_letterhead_table(cursor, mode):
         old_lh = load_config().get('letterhead', {}) or {}
         cursor.execute(
             f"INSERT INTO letterhead_settings (id, company_name, sub_heading, address, phone, "
-            f"email, footer_note, header_height_px, show_border, use_pad_image, pad_image) "
-            f"VALUES ({ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph})",
+            f"email, footer_note, header_height_px, footer_height_px, show_border, use_pad_image, pad_image) "
+            f"VALUES ({ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph})",
             (
                 1,
                 old_lh.get('company_name', ''),
@@ -266,6 +282,7 @@ def _ensure_letterhead_table(cursor, mode):
                 old_lh.get('email', ''),
                 old_lh.get('footer_note', ''),
                 int(old_lh.get('header_height_px') or 140),
+                int(old_lh.get('footer_height_px') or 110),
                 1 if old_lh.get('show_border', True) else 0,
                 0,
                 ''
@@ -307,6 +324,7 @@ def save_letterhead_settings(payload):
         'email': payload.get('email', existing.get('email', '')),
         'footer_note': payload.get('footer_note', existing.get('footer_note', '')),
         'header_height_px': int(payload.get('header_height_px') or existing.get('header_height_px') or 140),
+        'footer_height_px': int(payload.get('footer_height_px') or existing.get('footer_height_px') or 110),
         'show_border': payload.get('show_border', existing.get('show_border', True)),
         'use_pad_image': payload.get('use_pad_image', existing.get('use_pad_image', False)),
         'pad_image': pad_image if 'pad_image' in payload else existing.get('pad_image', ''),
@@ -318,15 +336,15 @@ def save_letterhead_settings(payload):
     values = (
         merged['company_name'], merged['sub_heading'], merged['address'],
         merged['phone'], merged['email'], merged['footer_note'],
-        merged['header_height_px'],
+        merged['header_height_px'], merged['footer_height_px'],
         1 if merged['show_border'] else 0,
         1 if merged['use_pad_image'] else 0,
         merged['pad_image'],
     )
     cursor.execute(
         f"UPDATE letterhead_settings SET company_name={ph}, sub_heading={ph}, address={ph}, "
-        f"phone={ph}, email={ph}, footer_note={ph}, header_height_px={ph}, show_border={ph}, "
-        f"use_pad_image={ph}, pad_image={ph} WHERE id = 1",
+        f"phone={ph}, email={ph}, footer_note={ph}, header_height_px={ph}, footer_height_px={ph}, "
+        f"show_border={ph}, use_pad_image={ph}, pad_image={ph} WHERE id = 1",
         values
     )
     if mode == 'sqlite':
@@ -557,7 +575,7 @@ def list_products(client_id):
     cursor = conn.cursor()
     ph = _ph(mode)
     cursor.execute(
-        f"SELECT id, product_type, size, unit_price FROM products WHERE client_id = {ph} "
+        f"SELECT id, product_type, size, unit_price, origin FROM products WHERE client_id = {ph} "
         f"ORDER BY product_type ASC, size ASC",
         (client_id,)
     )
@@ -857,9 +875,9 @@ def save_entry(entry_id, data, client_id=None, created_by=None):
 
 def save_multi_item_entry(entry_id, shared_data, line_items, client_id=None, created_by=None):
     """Like save_entry(), but inserts one row per product line item, all
-    sharing a single chalan_no/input_invoice_no. Only supports sales and
-    purchases — these are the only tables with a per-transaction reference
-    number that multiple product rows can share.
+    sharing a single chalan_no/input_invoice_no/quotation_no. Supports sales,
+    purchases and quotations — the only tables with a per-transaction
+    reference number that multiple product rows can share.
 
     Advance/due are invoice-level concepts but the schema stores them per
     row, so the full advance and the resulting due are attributed entirely
@@ -867,6 +885,7 @@ def save_multi_item_entry(entry_id, shared_data, line_items, client_id=None, cre
     SUM(advance) across the invoice's rows numerically correct without
     prorating — prorating would let a single overpaid/underpaid line item
     silently misstate that item's own due while the others looked fine.
+    Quotations have no advance/due columns at all, so this is a no-op for them.
     """
     config = load_config()
     if not client_id:
@@ -877,8 +896,8 @@ def save_multi_item_entry(entry_id, shared_data, line_items, client_id=None, cre
         raise ValueError(f"Unknown entry point ID: {entry_id}")
 
     table_name = entry_def['table']
-    if table_name not in ('sales', 'purchases'):
-        raise ValueError("Multi-item entry is only supported for sales and purchases")
+    if table_name not in ('sales', 'purchases', 'quotations'):
+        raise ValueError("Multi-item entry is only supported for sales, purchases and quotations")
     if not line_items:
         raise ValueError("At least one product line item is required")
 
@@ -891,12 +910,22 @@ def save_multi_item_entry(entry_id, shared_data, line_items, client_id=None, cre
         is_admin = (role == 'admin')
         now = datetime.now().isoformat(timespec='seconds')
 
+        # "Previous" entries are historical/backfill records the client is
+        # keying in from paper records — they must never touch inventory
+        # (the stock was already accounted for when it originally happened)
+        # and are auto-authorized immediately since there's no live workflow
+        # left to gate: nothing to double-check, no inventory to protect.
+        is_previous = table_name in ('sales', 'purchases') and \
+            str(shared_data.get('record_source', '')).strip().lower() == 'previous'
+
         if table_name == 'sales':
             ref_no = shared_data.get('chalan_no') or get_next_chalan(client_id)
-        else:
+        elif table_name == 'purchases':
             ref_no = shared_data.get('input_invoice_no')
             if not ref_no:
                 raise ValueError("Input Invoice No is required")
+        else:
+            ref_no = shared_data.get('quotation_no') or get_next_quotation_no(client_id)
 
         advance_total = float(shared_data.get('advance') or 0)
 
@@ -911,7 +940,8 @@ def save_multi_item_entry(entry_id, shared_data, line_items, client_id=None, cre
                 line_total = round(qty * price, 2)
                 provided_cost = li.get('cost_price')
                 if provided_cost in (None, "", 0, "0"):
-                    cost = _get_inventory_cost(cursor, mode, client_id, li.get('product_type'), li.get('size'))
+                    cost = 0.0 if is_previous else _get_inventory_cost(
+                        cursor, mode, client_id, li.get('product_type'), li.get('size'))
                 else:
                     cost = float(provided_cost)
                 prepared.append({**li, 'received_quantity': qty, 'sale_unit_price': price,
@@ -937,16 +967,31 @@ def save_multi_item_entry(entry_id, shared_data, line_items, client_id=None, cre
 
             if table_name == 'sales':
                 insert_data['chalan_no'] = ref_no
-            else:
+            elif table_name == 'purchases':
                 insert_data['input_invoice_no'] = ref_no
+            else:
+                insert_data['quotation_no'] = ref_no
 
             insert_data['advance'] = overall_advance_applied if idx == 0 else 0
             insert_data['due'] = overall_due if idx == 0 else 0
 
             insert_data['created_by'] = created_by
-            insert_data['status'] = 'authorized' if is_admin else 'pending'
-            insert_data['authorized_by'] = created_by if is_admin else None
-            insert_data['authorized_at'] = now if is_admin else None
+            if is_previous:
+                insert_data['record_source'] = 'Previous'
+                insert_data['status'] = 'authorized'
+                insert_data['authorized_by'] = created_by
+                insert_data['authorized_at'] = now
+            elif table_name in ('sales', 'purchases'):
+                insert_data['record_source'] = 'New'
+                insert_data['status'] = 'authorized' if is_admin else 'pending'
+                insert_data['authorized_by'] = created_by if is_admin else None
+                insert_data['authorized_at'] = now if is_admin else None
+            else:
+                # Quotations always start pending — an admin must explicitly
+                # approve them via the Quotation Report, regardless of who created it.
+                insert_data['status'] = 'pending'
+                insert_data['authorized_by'] = None
+                insert_data['authorized_at'] = None
 
             # Coerce numeric-like fields (mirrors save_entry's own pass),
             # skipping advance/due which are already deliberately set above.
@@ -969,7 +1014,9 @@ def save_multi_item_entry(entry_id, shared_data, line_items, client_id=None, cre
             cursor.execute(f"INSERT INTO {table_name} ({', '.join(cols)}) VALUES ({placeholders})", vals)
             new_ids.append(cursor.lastrowid)
 
-            if table_name == 'purchases' and insert_data.get('status') == 'authorized':
+            if is_previous:
+                pass  # historical backfill — never touches inventory or the products catalog
+            elif table_name == 'purchases' and insert_data.get('status') == 'authorized':
                 _inventory_add_purchase(
                     cursor, mode, client_id,
                     insert_data.get('product_type'), insert_data.get('size'),
@@ -992,13 +1039,115 @@ def save_multi_item_entry(entry_id, shared_data, line_items, client_id=None, cre
 
         result = {
             "status": "success", "table": table_name, "ids": new_ids,
-            "line_count": len(new_ids), "entry_status": 'authorized' if is_admin else 'pending'
+            "line_count": len(new_ids),
+            "entry_status": insert_data.get('status')
         }
         if table_name == 'sales':
             result["chalan_no"] = ref_no
-        else:
+        elif table_name == 'purchases':
             result["input_invoice_no"] = ref_no
+        else:
+            result["quotation_no"] = ref_no
         return result
+    finally:
+        conn.close()
+
+
+# ---------------- QUOTATIONS ----------------
+def get_next_quotation_no(client_id):
+    config = load_config()
+    pad = int(config['system'].get('chalan_pad', 6))
+    conn, mode = get_db_connection()
+    cursor = conn.cursor()
+    ph = _ph(mode)
+    cursor.execute(f"SELECT COUNT(DISTINCT quotation_no) as cnt FROM quotations WHERE client_id = {ph}", (client_id,))
+    row = cursor.fetchone()
+    count = row[0] if mode == 'sqlite' else row['cnt']
+    conn.close()
+    next_no = int(count or 0) + 1
+    return f"QT-{str(next_no).zfill(pad)}"
+
+
+def list_quotation_refs(client_id=None):
+    """Approved quotations available to link into a Sales Entry."""
+    config = load_config()
+    if not client_id:
+        client_id = config['system'].get('default_client_id', 'CLI-001')
+    conn, mode = get_db_connection()
+    cursor = conn.cursor()
+    ph = _ph(mode)
+    cursor.execute(
+        f"SELECT DISTINCT quotation_no, customer_name FROM quotations "
+        f"WHERE client_id = {ph} AND status = {ph} ORDER BY quotation_no DESC",
+        (client_id, 'approved')
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_quotation_data(quotation_no, client_id=None):
+    config = load_config()
+    if not client_id:
+        client_id = config['system'].get('default_client_id', 'CLI-001')
+    conn, mode = get_db_connection()
+    cursor = conn.cursor()
+    ph = _ph(mode)
+    cursor.execute(
+        f"SELECT * FROM quotations WHERE quotation_no = {ph} AND client_id = {ph} ORDER BY id ASC",
+        (quotation_no, client_id)
+    )
+    rows = cursor.fetchall()
+    items = [dict(r) for r in rows] if mode == 'sqlite' else list(rows)
+    conn.close()
+    if not items:
+        return None
+    header = items[0]
+    grand_total = round(sum(float(i.get('total') or 0) for i in items), 2)
+    return {
+        "quotation_no": quotation_no,
+        "customer_name": header.get('customer_name'),
+        "quotation_date": header.get('quotation_date'),
+        "status": header.get('status'),
+        "items": items,
+        "grand_total": grand_total,
+        "letterhead": get_letterhead_settings(),
+        "system": config.get('system', {})
+    }
+
+
+def approve_quotation(quotation_no, requested_by, client_id=None):
+    config = load_config()
+    if not client_id:
+        client_id = config['system'].get('default_client_id', 'CLI-001')
+
+    conn, mode = get_db_connection()
+    cursor = conn.cursor()
+    ph = _ph(mode)
+
+    try:
+        role = _lookup_user_role(cursor, mode, requested_by)
+        if role != 'admin':
+            raise ValueError("Only an admin can approve quotations")
+
+        cursor.execute(
+            f"SELECT COUNT(*) as cnt FROM quotations WHERE quotation_no = {ph} AND client_id = {ph}",
+            (quotation_no, client_id)
+        )
+        row = cursor.fetchone()
+        cnt = row[0] if mode == 'sqlite' else row['cnt']
+        if not cnt:
+            raise ValueError("Quotation not found")
+
+        now = datetime.now().isoformat(timespec='seconds')
+        cursor.execute(
+            f"UPDATE quotations SET status = {ph}, authorized_by = {ph}, authorized_at = {ph} "
+            f"WHERE quotation_no = {ph} AND client_id = {ph}",
+            ('approved', requested_by, now, quotation_no, client_id)
+        )
+        if mode == 'sqlite':
+            conn.commit()
+        return {"status": "success", "quotation_no": quotation_no}
     finally:
         conn.close()
 
@@ -1091,7 +1240,7 @@ def list_pending_transactions(client_id=None):
     return {"purchases": purchases, "sales": sales}
 
 
-DELETABLE_TABLES = ('products', 'inventory', 'customers', 'transporters', 'purchases', 'sales')
+DELETABLE_TABLES = ('products', 'inventory', 'customers', 'transporters', 'purchases', 'sales', 'quotations')
 
 # Master data with no derived/dependent fields (no totals, no inventory
 # side-effects, no authorization workflow) — a plain column update is safe.
@@ -1168,7 +1317,14 @@ def delete_entry(table_name, record_id, requested_by, client_id=None):
             raise ValueError("Record not found")
         record = dict(row) if mode == 'sqlite' else row
 
-        if table_name == 'purchases' and record.get('status') == 'authorized':
+        # "Previous" (historical backfill) rows never touched inventory when
+        # created, so deleting one must not reverse an adjustment that was
+        # never applied in the first place.
+        is_previous = str(record.get('record_source', '')).strip().lower() == 'previous'
+
+        if is_previous:
+            pass
+        elif table_name == 'purchases' and record.get('status') == 'authorized':
             _inventory_adjust_quantity(
                 cursor, mode, client_id,
                 record.get('product_type'), record.get('size'),
@@ -1343,8 +1499,20 @@ def update_user(user_id, requested_by, new_username=None, new_password=None):
 
 
 # ---------------- REPORTS ----------------
+def _record_mode_clause(table, record_mode):
+    """SQL fragment filtering a sales/purchases sub-select by record_source.
+    Transporters have no record_source column at all (point 4/5 only cover
+    Sales/Purchase), so a 'Previous' view excludes that table entirely
+    rather than erroring on a missing column."""
+    if table == 'transporters':
+        return " AND 1=0" if record_mode == 'Previous' else ""
+    if record_mode == 'Previous':
+        return " AND record_source = 'Previous'"
+    return " AND (record_source = 'New' OR record_source IS NULL)"
+
+
 def execute_report(report_id, client_id=None, date_from=None, date_to=None,
-                   customer=None, txn_type=None):
+                   customer=None, txn_type=None, record_mode=None):
     config = load_config()
     if not client_id:
         client_id = config['system'].get('default_client_id', 'CLI-001')
@@ -1357,25 +1525,26 @@ def execute_report(report_id, client_id=None, date_from=None, date_to=None,
     cursor = conn.cursor()
 
     params = {'client_id': client_id}
+    record_mode_eff = record_mode if record_mode in ('New', 'Previous') else 'New'
 
     # Build per-type queries for customer_dues_report when a specific type is requested
     if txn_type and report_def.get('supports_txn_type_filter') and txn_type != 'All':
         if txn_type == 'Sales':
             sql = ("SELECT buyer_name as customer, SUM(sale_total_price) as total_amount, "
                    "SUM(advance) as total_advance, SUM(due) as total_due "
-                   "FROM sales WHERE client_id = :client_id AND status = 'authorized' "
+                   "FROM sales WHERE client_id = :client_id AND status = 'authorized' {rm_sales} "
                    "{date_filter} GROUP BY buyer_name ORDER BY total_due DESC")
             date_col = 'sale_date'
         elif txn_type == 'Purchase':
             sql = ("SELECT supplier_name as customer, SUM(total) as total_amount, "
                    "SUM(advance) as total_advance, SUM(due) as total_due "
-                   "FROM purchases WHERE client_id = :client_id AND status = 'authorized' "
+                   "FROM purchases WHERE client_id = :client_id AND status = 'authorized' {rm_purchases} "
                    "{date_filter} GROUP BY supplier_name ORDER BY total_due DESC")
             date_col = 'purchase_date'
         elif txn_type == 'Transport':
             sql = ("SELECT transporter_name as customer, SUM(rent) as total_amount, "
                    "SUM(advance) as total_advance, SUM(due) as total_due "
-                   "FROM transporters WHERE client_id = :client_id "
+                   "FROM transporters WHERE client_id = :client_id {rm_transport} "
                    "{date_filter} GROUP BY transporter_name ORDER BY total_due DESC")
             date_col = 'entry_date'
         else:
@@ -1402,7 +1571,11 @@ def execute_report(report_id, client_id=None, date_from=None, date_to=None,
         customer_filter_sql = f" AND {filter_col} = :customer"
         params['customer'] = customer
 
-    sql = sql.replace("{date_filter}", date_filter_sql).replace("{customer_filter}", customer_filter_sql)
+    sql = (sql.replace("{date_filter}", date_filter_sql)
+              .replace("{customer_filter}", customer_filter_sql)
+              .replace("{rm_sales}", _record_mode_clause('sales', record_mode_eff))
+              .replace("{rm_purchases}", _record_mode_clause('purchases', record_mode_eff))
+              .replace("{rm_transport}", _record_mode_clause('transporters', record_mode_eff)))
 
     if mode == 'sqlite':
         cursor.execute(sql, params)
@@ -1433,7 +1606,8 @@ def execute_report(report_id, client_id=None, date_from=None, date_to=None,
         "summary_column": summary_col,
         "summary_total": round(total_summary, 2),
         "supports_period": bool(report_def.get('supports_period')),
-        "supports_customer_filter": bool(report_def.get('supports_customer_filter'))
+        "supports_customer_filter": bool(report_def.get('supports_customer_filter')),
+        "supports_record_mode": bool(report_def.get('supports_record_mode'))
     }
 
 
@@ -1478,6 +1652,42 @@ def get_invoice_data(invoice_id, client_id=None):
         "letterhead": get_letterhead_settings(),
         "system": config.get('system', {})
     }
+
+
+# ---------------- CHALLAN FILE UPLOADS (Google Drive) ----------------
+def save_challan_upload(chalan_no, client_id, file_name, drive_file_id, drive_view_url, uploaded_by):
+    """Upsert keyed by (client_id, chalan_no) — a chalan is one physical
+    document even though a multi-product sale spreads it across several
+    sales rows, so the attachment lives in its own table rather than being
+    duplicated onto every line-item row."""
+    conn, mode = get_db_connection()
+    cursor = conn.cursor()
+    ph = _ph(mode)
+    now = datetime.now().isoformat(timespec='seconds')
+    try:
+        cursor.execute(
+            f"SELECT id FROM challan_uploads WHERE chalan_no = {ph} AND client_id = {ph}",
+            (chalan_no, client_id)
+        )
+        existing = cursor.fetchone()
+        if existing:
+            cursor.execute(
+                f"UPDATE challan_uploads SET file_name = {ph}, drive_file_id = {ph}, "
+                f"drive_view_url = {ph}, uploaded_by = {ph}, uploaded_at = {ph} "
+                f"WHERE chalan_no = {ph} AND client_id = {ph}",
+                (file_name, drive_file_id, drive_view_url, uploaded_by, now, chalan_no, client_id)
+            )
+        else:
+            cursor.execute(
+                f"INSERT INTO challan_uploads (client_id, chalan_no, file_name, drive_file_id, "
+                f"drive_view_url, uploaded_by, uploaded_at) VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})",
+                (client_id, chalan_no, file_name, drive_file_id, drive_view_url, uploaded_by, now)
+            )
+        if mode == 'sqlite':
+            conn.commit()
+        return {"status": "success", "chalan_no": chalan_no, "drive_view_url": drive_view_url}
+    finally:
+        conn.close()
 
 
 def get_dashboard(client_id=None):

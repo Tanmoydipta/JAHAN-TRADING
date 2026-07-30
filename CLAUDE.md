@@ -13,12 +13,14 @@ Flask + vanilla JS ERP system for a trading/inventory business. Config-driven sc
 ## Database schema (tables, defined in config.json → `tables`)
 
 - `users` — id, username (unique), password_hash (sha256), full_name, role, client_id, is_active
-- `products` — id, client_id, product_type, size, unit_price
+- `products` — id, client_id, product_type, size, unit_price, **origin** (nullable, auto-migrated)
 - `inventory` — id, client_id, product_type, size, quantity, cost_price
 - `customers` — id, client_id, customer_name, customer_type, contact_number
 - `transporters` — id, client_id, entry_date, transporter_name, truck_no, movement_type, reference_no, quantity, **from_location**, **to_location**, rent, advance, due
-- `purchases` — id, client_id, input_invoice_no, purchase_date, supplier_name, mobile_number, product_type, size, unit_price, quantity, total, transporter_name, truck_no, loading_location, **unloading_location**, advance, due
-- `sales` — id, client_id, chalan_no, sale_date, buyer_name, contact_number, product_type, size, received_quantity, cost_price, sale_unit_price, sale_total_price, po_order, transporter_name, truck_no, **loading_location**, unloading_location, advance, due
+- `purchases` — id, client_id, input_invoice_no, purchase_date, supplier_name, mobile_number, product_type, size, unit_price, quantity, total, transporter_name, truck_no, loading_location, **unloading_location**, advance, due, **record_source** (`'New'`/`'Previous'`, default `'New'`)
+- `sales` — id, client_id, chalan_no, sale_date, buyer_name, contact_number, product_type, size, received_quantity, cost_price, sale_unit_price, sale_total_price, po_order, transporter_name, truck_no, **loading_location**, unloading_location, advance, due, **record_source** (`'New'`/`'Previous'`, default `'New'`)
+- `quotations` — id, client_id, quotation_no, quotation_date, customer_name, product_type, size, origin, unit_price, quantity, total, status (`pending`/`approved`), created_by, authorized_by, authorized_at
+- `challan_uploads` — id, client_id, chalan_no, file_name, drive_file_id, drive_view_url, uploaded_by, uploaded_at (one row per chalan_no — see Google Drive section)
 
 Seed data (`seed_admin_and_demo()`): admin user (`admin`/`admin123`, role=`admin`, client_id=`CLI-001`), 5 demo products (Steel Rod 12mm/16mm, Hydraulic Valve, Brass Fitting, Bearing Set).
 
@@ -32,10 +34,16 @@ Seed data (`seed_admin_and_demo()`): admin user (`admin`/`admin123`, role=`admin
 - `GET /api/config` — returns config **minus secrets**: `database_config` is stripped down to just `{"mode": ...}` before being sent to the browser (never leaks host/user/password to the client-side JS — this was a deliberate security fix, don't regress it)
 - `POST /api/login` — `{username, password}` → user + role_permissions
 - `GET/POST /api/users` — list / create users
+- `PUT /api/users/<id>` — admin-only edit username/password
+- `DELETE /api/users/<id>` — admin-only delete user
 - `GET /api/dashboard?client_id=` — summary metrics
 - `GET /api/next_chalan?client_id=` — next sales chalan number
 - `GET /api/products?client_id=`, `/api/inventory?client_id=`, `/api/customers?client_id=&type=`
 - `POST /api/entry/<entry_id>` — generic save for any entry_point form (`entry_id` matches an id in config `entry_points`)
+- `POST /api/entry/<entry_id>/multi` — multi-item save for sales/purchase (shared fields + array of line items)
+- `PUT /api/record/<table>/<id>` — admin-only generic update (whitelisted tables: products, customers)
+- `DELETE /api/record/<table>/<id>` — generic delete (permissions: can_delete role flag)
+- `POST /api/record/<table>/<id>/adjust` — adjust due date / advance on transaction (admin-only)
 - `GET /api/report/<report_id>?client_id=&from=&to=&customer=&txn_type=` — generic report runner; `txn_type` (Sales/Purchase/Transport/All) filters customer_dues_report by transaction category
 - `GET /api/invoice/<invoice_id>?client_id=` — invoice/chalan data for printing
 - `POST /api/letterhead` — updates `config.json → letterhead` and invalidates the in-memory config cache
@@ -43,6 +51,10 @@ Seed data (`seed_admin_and_demo()`): admin user (`admin`/`admin123`, role=`admin
 Config is cached in-memory with mtime-based invalidation (`load_config()` / `invalidate_config_cache()` in `database.py`).
 
 - `GET /api/invoice_refs?client_id=&type=sales|purchases` — returns reference numbers with `quantity`, `from_location`, `to_location` for auto-fill in the transporter entry form
+- `GET /api/quotation_refs?client_id=` — approved quotations available to link into a Sales Entry
+- `GET /api/quotation/<quotation_no>?client_id=` — quotation header + line items, used both for the print pad and Sales Entry auto-fill
+- `POST /api/quotation/<quotation_no>/approve` — admin-only, flips every row sharing that quotation_no to `status='approved'`
+- `POST /api/sales/<chalan_no>/challan` — multipart file upload; pushes the file to Google Drive (service account) and records the link in `challan_uploads`
 
 ## Report system (config.json → `report_points`)
 
@@ -50,6 +62,21 @@ Each report definition supports these optional flags:
 - `supports_period: true` — shows the date range filter in the toolbar
 - `supports_customer_filter: true` — shows the customer name filter
 - `supports_txn_type_filter: true` — shows a Sales/Purchase/Transport/All dropdown (currently on `customer_dues_report` only)
+
+Reports include built-in action buttons depending on configuration:
+- **Delete** button: available if report is in `DELETABLE_REPORT_TABLES` (sales, purchases, transporters, inventory, products, customers, quotations) and user has `can_delete` permission
+- **Edit** button: available if report is in `EDITABLE_REPORT_TABLES` (products_report, customer_report) and user is admin
+- **Adjust** button: available if report is in `ADJUSTABLE_REPORT_TABLES` (sales, purchases, transporters) and user is admin — allows tweaking payment_due_date and advance deltas
+- **Invoice** button: available on sales_report only — opens the invoice modal for printing/viewing
+- **Challan** button: available on sales_report only — uploads a file to Google Drive for that chalan_no (see Google Drive section); the "Challan File" column shows a **View File** link once uploaded
+- **Print** button: available on quotation_report only — reopens the quotation print pad
+- **Approve** button: available on quotation_report only when `row.status === 'pending'` and user is admin — calls the approve endpoint for that quotation_no
+
+A new **Customer Directory** report (`customer_report`) lists all customers with name, type, and contact number, with Edit and Delete actions available to admins.
+
+### Record mode (New/Previous) report filter
+
+`customer_dues_report` and `customer_transactions_report` have `supports_record_mode: true` and a "Records" New/Previous dropdown in the toolbar (`reportRecordModeFilter` in `index.html`, wired in `loadReportData()`). This filters their sales/purchases sub-selects by the `record_source` column — see the "New vs Previous entry mode" section below. Transporters have no `record_source` column at all, so a "Previous" view excludes that table's rows entirely (`_record_mode_clause()` in `database.py` returns `AND 1=0` for it in that case) rather than erroring.
 
 ### Transport cost in reports
 
@@ -69,9 +96,68 @@ When `txn_type` ≠ `All`, `execute_report()` in `database.py` builds a per-type
 - `Purchase` → aggregates from `purchases` table, grouped by `supplier_name`
 - `Transport` → aggregates from `transporters` table, grouped by `transporter_name`
 
+### Multi-item entries (Sales / Purchase)
+
+Sales and Purchase entry forms now support multiple product line items in a single transaction (one chalan_no or input_invoice_no shared across all rows). Frontend (`app.js`):
+- `MULTI_ITEM_FIELDS` maps `new_sale` → [product_type, size, cost_price, received_quantity, sale_unit_price] and `new_purchase` → [product_type, size, quantity, unit_price]
+- User sets a "Number of Products" count; `renderLineItemRows()` renders N rows with row-level inputs + live subtotal per row
+- `recalcLineItemTotals()` computes grand total + grand advance + grand due across all rows
+- `collectLineItems()` gathers all line-item data; `handleFormSubmit()` detects multi-item mode and calls `/api/entry/<entry_id>/multi` instead of `/api/entry/<entry_id>`
+
+Backend (`database.py → save_multi_item_entry()`):
+- Accepts `shared` (buyer_name, sale_date, advance, etc.) and `line_items` (array of product specs)
+- Generates one chalan_no/input_invoice_no and saves N rows to the `sales`/`purchases` table, all sharing that same ref
+- First row gets full `advance`/`due` attribution; subsequent rows get 0/0 so report aggregates stay correct
+- Inventory side-effects apply per row: `_inventory_add_purchase()` and `_inventory_reduce_sale()` run for each item
+
+Invoice rendering (`get_invoice_data()` / `openInvoiceModal()`):
+- Returns all rows sharing a chalan_no as `data.items` (single-product sales unaffected — items is just length 1)
+- Invoice modal renders one table row per product and sums subtotal/advance/due/grand across them
+
 ### Transporter entry auto-fill
 
 The `new_transporter` form has two **readonly** fields: `from_location` and `to_location`. When the user picks an invoice reference (`invoice_ref_select`), `app.js` reads `from_location`/`to_location` from the `<option>` element's `dataset` (populated by `/api/invoice_refs`) and fills those fields automatically.
+
+### Product & Customer editing
+
+Frontend (`app.js`) exposes Edit buttons on `products_report` and the new `customer_report` via `EDITABLE_REPORT_TABLES` map (spec: `{ table, entryPointId }`). Clicking Edit opens a dynamic modal (`editRecordModal`) pre-filled from the report row, with fields sourced from the matching entry_point's field list. `submitEditRecord()` POSTs to `PUT /api/record/<table>/<id>`.
+
+Backend (`database.py → update_record()`):
+- Admin-only (role check enforced). Whitelisted to `EDITABLE_TABLES = ('products', 'customers')` — transaction tables excluded since editing quantity/price after the fact would desync inventory and due/advance.
+- Filters payload to only real table columns; excludes immutable `id` and `client_id`. Returns `{status: success, table, id}`.
+
+### Quotations
+
+`new_quotation` entry_point (table `quotations`) reuses the same multi-item line-item UI as Sales/Purchase (`MULTI_ITEM_FIELDS.new_quotation = ['product_type', 'size', 'origin', 'unit_price', 'quantity']`). Shared fields: quotation_no (auto-generated, readonly), quotation_date, customer_name (customer_select, `Sales` type filter).
+
+Backend (`database.py`):
+- `save_multi_item_entry()` was extended to accept `table_name == 'quotations'` alongside sales/purchases — it shares the same line-item-total computation as purchases (`quantity`/`unit_price`/`total`), just with no advance/due and no inventory side-effects.
+- Quotations always save with `status = 'pending'` regardless of who creates them — an admin must explicitly approve via `quotation_report`'s **Approve** button (`approve_quotation()`), which flips every row sharing that quotation_no to `status = 'approved'`.
+- `get_next_quotation_no()` — `QT-` prefix + zero-padded counter (`COUNT(DISTINCT quotation_no)` + 1, padded per `system.chalan_pad`).
+- `get_quotation_data(quotation_no, client_id)` — returns header + all line items + `grand_total`, used both by the print pad (`openQuotationModal()` in `app.js`) and by Sales Entry's auto-fill.
+- `list_quotation_refs(client_id)` — only **approved** quotations, for the Sales Entry dropdown.
+
+Printing: `new_quotation`'s save success handler calls `openQuotationModal(data.quotation_no)` automatically (mirrors `openInvoiceModal()` for sales). The quotation pad is a separate modal (`#quotationModal` in `index.html`) with its own element ids (`qp*` prefix) but shares the same `.business-pad-paper`/`.pad-*` CSS classes and the `applyPadBackground()` helper in `app.js`, so header/footer/signature alignment stays identical to the invoice pad.
+
+### Linking a Quotation into Sales Entry
+
+`new_sale`'s field list has an extra `quotation_no` field (`type: "quotation_ref_select"`), rendered as a dropdown populated from `/api/quotation_refs`. Leaving it on `-- No Quotation --` changes nothing (manual entry as before). Selecting one calls `applyQuotationToSale(quotationNo)` in `app.js`, which:
+- fetches `/api/quotation/<no>`, sets `buyer_name` (injecting a transient `<option>` if that customer isn't already registered)
+- sets the "Number of Products" count to the quotation's item count and re-renders the line-item rows
+- fills each row's product/size/quantity/price from the matching quotation item, injecting a transient inventory option if that product/size isn't currently in stock (`(from quotation — not currently in stock)`)
+
+`quotation_no` is never persisted on the `sales` table (no such column) — it's submitted in the payload but silently dropped by the generic table-column filter in `save_multi_item_entry()`.
+
+### New vs Previous entry mode (Sales & Purchase)
+
+Both `new_sale` and `new_purchase` have a `record_source` field (`type: "select"`, options `["New", "Previous"]`, default `"New"`) rendered as the **first** field in the form. Unlike other fields it's handled specially in `renderEntryForm()`: selecting it sets the global `currentRecordMode` and does a full `renderEntryForm(entryId)` re-render, rather than just updating one input — because switching modes changes which field *types* are used across the whole form.
+
+- **New** (default): behaves exactly as before — inventory/product/customer dropdowns, auto-generated chalan/invoice numbers, inventory updated on save.
+- **Previous** (historical backfill): every `customer_select` / `inventory_select` / `product_select` / `invoice_ref_select` / `quotation_ref_select` field becomes a plain text/number input (`effectiveFieldType()` in `app.js`), `chalan_no` becomes editable instead of readonly/auto-generated, and the line-item rows (`buildLineItemRow()`) render plain manual inputs instead of catalog-linked selects.
+
+`currentRecordMode` resets to `"New"` only when navigating to a *different* entry tab (`switchEntryTab()`) — toggling the dropdown itself re-renders the same form without resetting itself.
+
+Backend (`save_multi_item_entry()` in `database.py`): when `shared.record_source` is `"Previous"` (case-insensitive), the row is saved with `record_source = 'Previous'`, `status = 'authorized'` immediately (no admin authorization queue — there's nothing left to gate), and **no inventory/product-catalog side-effects run at all**, regardless of role. `delete_entry()` mirrors this: it checks `record.record_source` before reversing any inventory adjustment, so deleting a Previous row never wrongly subtracts/adds inventory that was never touched in the first place.
 
 ### Print / PDF output
 
@@ -83,7 +169,24 @@ The `new_transporter` form has two **readonly** fields: `from_location` and `to_
 - `@page { size: A4 landscape; }` print CSS
 - `setTimeout(() => win.print(), 600)` for DOM readiness
 
-The main window's `style.css` print block only shows `#invoiceModal.active` — all other `.modal-overlay` elements are hidden during print to prevent the dark-themed app from leaking into the printout.
+The main window's `style.css` print block shows `#invoiceModal.active` or `#quotationModal.active` — all other `.modal-overlay` elements are hidden during print to prevent the dark-themed app from leaking into the printout.
+
+### Business pad alignment (invoice + quotation pads)
+
+Both print pads share `applyPadBackground()` (`app.js`) so their header/footer/signature positioning stays identical:
+- **Footer padding**: letterhead settings gained `footer_height_px` (default 110, alongside the existing `header_height_px`) — `paddingBottom` is set to this when `use_pad_image` is on, so invoice/quotation content (signature row, footer note) doesn't run into the pre-printed pad's bottom address bars. Configurable in Business Pad Setup.
+- **Aspect ratio fix**: previously `background-size: 100% 100%` stretched the uploaded pad image to whatever height the invoice content happened to need — a short invoice vs. a long multi-item one would squash/stretch the pad artwork by different amounts, shifting the header/footer bands on every print. `applyPadBackground()` now loads the pad image and sets `padPaper.style.aspectRatio` to the image's own `naturalWidth/naturalHeight`, so the container's shape always matches the image and the 100%/100% stretch is lossless. Content beyond that fixed height scrolls on-screen (`overflow-y: auto`, unchanged) rather than distorting the pad.
+- **Signature labels**: both pads show "Authorised Signature" (left) / "Received Signature" (right) — replacing the old "Customer Signature"/"Authorized Signature" wording.
+
+## Google Drive challan uploads (Sales Report)
+
+Sales Report has an **Upload Challan** button per row (`promptChallanUpload()` in `app.js`) that uploads a photo/scan to a shared Google Drive folder via a **service account** (not per-user OAuth — no browser consent step needed, works headlessly on Render or the packaged exe). See `GOOGLE_DRIVE_SETUP.md` for the full one-time setup walkthrough.
+
+- Config: `config.json → google_drive` = `{"service_account_key_path": ..., "challans_folder_id": ...}` (server-side only, never exposed via `/api/config`, same pattern as `database_config`).
+- `google_drive.py` — `upload_challan_to_drive()` wraps `google-api-python-client`/`google-auth` (imported lazily inside the function so a missing install doesn't break app startup, only the upload call). Raises `ValueError`/`FileNotFoundError` with actionable setup instructions if the key file or folder ID is missing.
+- Files are named `{chalan_no}_{buyer_name}_{sale_date}.{ext}` and all land in **one shared folder** (not per-invoice subfolders).
+- `database.py → save_challan_upload()` upserts into `challan_uploads` keyed by `(client_id, chalan_no)` — a chalan is one physical document even though a multi-product sale spreads it across several `sales` rows, so the attachment lives in its own table rather than being duplicated onto every line item.
+- `sales_report`'s query pulls the link back in via a correlated subquery (same pattern as `transport_cost`): `(SELECT drive_view_url FROM challan_uploads WHERE chalan_no = sales.chalan_no AND client_id = :client_id) as challan_file_url`. The generic report table renderer (`loadReportData()`) auto-links any cell value starting with `http` as a **View File** anchor.
 
 ## Cloud database (Aiven MySQL)
 
@@ -110,18 +213,31 @@ Goal: client runs the exe with **zero Python/module installation**.
 - `generate_customer_config.py` — interactive CLI that prompts for a customer's company info + their own cloud DB credentials and writes a customer-specific `config.json`. Use this before onboarding any real paying client.
 - `RESALE_DEPLOYMENT_GUIDE.md`, `RESALE_QUICK_REFERENCE.txt` — written guides for the resale/white-label workflow.
 
+## Multi-item transaction workflow
+
+A single Sales or Purchase transaction can now include multiple product line items, all sharing one chalan_no/input_invoice_no:
+
+1. **Frontend form flow**: User opens Sales Entry / Purchase Entry → sets "Number of Products" (default 1) → N repeatable rows render with product dropdowns and quantity/price inputs → user fills all rows → form auto-calculates running total per row and grand total across all
+2. **Submission**: `handleFormSubmit()` detects line items and sends `POST /api/entry/<entry_id>/multi` with `{ shared: {buyer_name, ...}, line_items: [{product_type, size, ...}, ...] }`
+3. **Backend processing**: `save_multi_item_entry()` inserts N rows to the DB, all sharing one chalan_no. Inventory & cost calculations apply per row.
+4. **Invoice rendering**: when user opens the invoice modal, all rows are rendered as a table; totals are summed across all items.
+5. **Reporting**: each row appears as a separate line in transaction reports, but they share the same chalan_no/invoice_no for grouping.
+
+**Key invariant**: the full advance/due from the form is attributed to the first inserted row; subsequent rows carry 0/0 advance/due. This ensures that when customer reports aggregate by invoice number, the total advance/due is correct without double-counting. The individual row records still exist for full audit trail.
+
 ## Known state / open items
 
 - No connection pooling for MySQL (each request opens/closes a connection via `get_db_connection()`).
 - No license-key / anti-piracy mechanism on the exe.
-- UI has not been exhaustively manually browser-tested across all entry/report forms — spot-checked login + products/dashboard API only.
 - `jahan_trading.db` in the project root is a local SQLite leftover from earlier local-mode testing; irrelevant while `mode: mysql` is active.
 - Flask dev server (`app.run(debug=False)`) is used directly — fine for a single-client desktop-style exe, not hardened for concurrent/public use.
 - `app.py` auto-opens the user's default browser 1.2s after the server starts (`threading.Timer` → `webbrowser.open_new`).
+- Google Drive challan upload is code-complete but **not yet live** — `service_account.json`/`challans_folder_id` haven't been provisioned yet (see `GOOGLE_DRIVE_SETUP.md`); until then, the Upload Challan button fails with a clear "not configured" message instead of erroring obscurely.
+- `list_products()` previously omitted the `origin` column entirely (a pre-existing bug, unrelated to whoever added the column) — fixed during the quotations work since the quotation line-item auto-fill depends on it.
 
 ## Schema migration pattern
 
-New columns are added to live DBs automatically via `_migrate_missing_columns()` in `database.py` — it runs `ALTER TABLE ... ADD COLUMN` for any column in `config.json → tables` that is missing from the live schema. No manual DB migration is ever needed; just add the column to config and restart. Columns added in the last major session: `unloading_location` (purchases), `loading_location` (sales), `from_location`/`to_location` (transporters).
+New columns are added to live DBs automatically via `_migrate_missing_columns()` in `database.py` — it runs `ALTER TABLE ... ADD COLUMN` for any column in `config.json → tables` that is missing from the live schema. No manual DB migration is ever needed; just add the column to config and restart. Columns added in the last major sessions: `unloading_location` (purchases), `loading_location` (sales), `from_location`/`to_location` (transporters), `origin` (products), `record_source` (sales, purchases). The `letterhead_settings` table (not config-driven — see below) gets its own small ad-hoc migration in `_ensure_letterhead_table()` for the same reason (`footer_height_px` added this session).
 
 ## Full session history
 

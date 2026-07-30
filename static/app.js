@@ -215,6 +215,7 @@ function switchTab(tabId) {
 function switchEntryTab(entryId) {
   currentTab = "entry-form";
   currentEntryId = entryId;
+  currentRecordMode = "New";
   document.querySelectorAll(".nav-item").forEach(el => el.classList.remove("active"));
   document.querySelector(`.nav-item[data-tab="entry-${entryId}"]`)?.classList.add("active");
   document.querySelectorAll(".tab-view").forEach(el => el.classList.remove("active"));
@@ -427,13 +428,34 @@ async function deleteUser(userId) {
 }
 
 // ---------------- ENTRY FORM ----------------
-// Sales/purchases can carry multiple product line items sharing one
-// chalan_no / input_invoice_no. These field names are rendered inside the
-// repeatable line-item rows instead of the normal one-per-form loop.
+// Sales/purchases/quotations can carry multiple product line items sharing
+// one chalan_no / input_invoice_no / quotation_no. These field names are
+// rendered inside the repeatable line-item rows instead of the normal
+// one-per-form loop.
 const MULTI_ITEM_FIELDS = {
   new_sale: ['product_type', 'size', 'cost_price', 'received_quantity', 'sale_unit_price'],
-  new_purchase: ['product_type', 'size', 'unit_price', 'quantity']
+  new_purchase: ['product_type', 'size', 'unit_price', 'quantity'],
+  new_quotation: ['product_type', 'size', 'origin', 'unit_price', 'quantity']
 };
+
+// New/Previous entry mode for Sales & Purchase — "Previous" is a manual
+// historical-backfill mode (see record_source field): every inventory/
+// customer/product lookup becomes a plain text input and nothing touches
+// inventory on save. Reset whenever the user navigates to a different
+// entry tab (switchEntryTab), not on every re-render, since toggling the
+// dropdown itself triggers a re-render and must not stomp on itself.
+let currentRecordMode = "New";
+
+function effectiveFieldType(f, entryId) {
+  if (currentRecordMode !== "Previous" || (entryId !== "new_sale" && entryId !== "new_purchase")) {
+    return f.type;
+  }
+  if (["customer_select", "inventory_select", "product_select", "invoice_ref_select", "quotation_ref_select"].includes(f.type)) {
+    const lname = f.name.toLowerCase();
+    return (lname.includes("quantity") || lname.includes("price")) ? "number" : "text";
+  }
+  return f.type;
+}
 
 async function renderEntryForm(entryId) {
   const ep = systemConfig.entry_points.find(x => x.id === entryId);
@@ -461,8 +483,9 @@ async function renderEntryForm(entryId) {
     label.innerText = f.label + (f.required ? " *" : "");
     group.appendChild(label);
 
+    const effType = effectiveFieldType(f, entryId);
     let input;
-    if (f.type === "select") {
+    if (f.name === "record_source") {
       input = document.createElement("select");
       input.className = "form-control";
       f.options.forEach(opt => {
@@ -470,7 +493,34 @@ async function renderEntryForm(entryId) {
         o.value = opt; o.innerText = opt;
         input.appendChild(o);
       });
-    } else if (f.type === "product_select") {
+      input.value = currentRecordMode;
+      input.onchange = () => { currentRecordMode = input.value; renderEntryForm(entryId); };
+    } else if (effType === "quotation_ref_select") {
+      input = document.createElement("select");
+      input.className = "form-control";
+      input.innerHTML = `<option value="">-- No Quotation (manual entry) --</option>`;
+      (async () => {
+        try {
+          const r = await apiFetch(`/api/quotation_refs?client_id=${currentClientId}`);
+          const refs = await r.json();
+          refs.forEach(ref => {
+            const o = document.createElement("option");
+            o.value = ref.quotation_no;
+            o.innerText = `${ref.quotation_no} — ${ref.customer_name}`;
+            input.appendChild(o);
+          });
+        } catch (e) { /* ignore */ }
+      })();
+      input.onchange = () => applyQuotationToSale(input.value);
+    } else if (effType === "select") {
+      input = document.createElement("select");
+      input.className = "form-control";
+      f.options.forEach(opt => {
+        const o = document.createElement("option");
+        o.value = opt; o.innerText = opt;
+        input.appendChild(o);
+      });
+    } else if (effType === "product_select") {
       input = document.createElement("select");
       input.className = "form-control";
       input.innerHTML = `<option value="">-- Select Product --</option>`;
@@ -490,7 +540,7 @@ async function renderEntryForm(entryId) {
         if (priceEl && opt.dataset.price) priceEl.value = opt.dataset.price;
         calculatePurchaseTotal();
       };
-    } else if (f.type === "inventory_select") {
+    } else if (effType === "inventory_select") {
       input = document.createElement("select");
       input.className = "form-control";
       input.innerHTML = `<option value="">-- Select from Inventory --</option>`;
@@ -518,7 +568,7 @@ async function renderEntryForm(entryId) {
         if (costEl) costEl.value = opt.dataset.cost || 0;
         calculateSalesTotal();
       };
-    } else if (f.type === "customer_select") {
+    } else if (effType === "customer_select") {
       input = document.createElement("select");
       input.className = "form-control";
       input.innerHTML = `<option value="">-- Select ${f.customer_type_filter} Customer --</option>`;
@@ -543,7 +593,7 @@ async function renderEntryForm(entryId) {
           if (contactEl) contactEl.value = opt.dataset.contact || "";
         };
       }
-    } else if (f.type === "invoice_ref_select") {
+    } else if (effType === "invoice_ref_select") {
       input = document.createElement("select");
       input.className = "form-control";
       input.innerHTML = `<option value="">-- Select Reference --</option>`;
@@ -579,13 +629,16 @@ async function renderEntryForm(entryId) {
       };
     } else {
       input = document.createElement("input");
-      input.type = f.type === "number" ? "number" : (f.type === "date" ? "date" : "text");
+      input.type = effType === "number" ? "number" : (effType === "date" ? "date" : "text");
       input.className = "form-control";
-      if (f.type === "number") input.step = "any";
+      if (effType === "number") input.step = "any";
       if (f.required) input.required = true;
-      if (f.readonly) input.readOnly = true;
-      if (f.auto_gen) input.value = `${f.auto_gen}${Date.now().toString().slice(-6)}`;
-      if (f.type === "date") input.value = new Date().toISOString().split('T')[0];
+      // Previous (historical backfill) mode always allows editing the
+      // reference number manually — there is no live auto-gen to protect.
+      const forceEditable = currentRecordMode === "Previous" && f.name === "chalan_no";
+      if (f.readonly && !forceEditable) input.readOnly = true;
+      if (f.auto_gen && currentRecordMode !== "Previous") input.value = `${f.auto_gen}${Date.now().toString().slice(-6)}`;
+      if (effType === "date") input.value = new Date().toISOString().split('T')[0];
       if (f.default !== undefined && !input.value) input.value = f.default;
     }
 
@@ -632,8 +685,8 @@ async function renderEntryForm(entryId) {
     refSelect._populateInvoiceRefs();
   });
 
-  // Auto-fill chalan
-  if (ep.table === 'sales') {
+  // Auto-fill chalan (skipped in Previous mode — the client keys in their own historical number)
+  if (ep.table === 'sales' && currentRecordMode !== 'Previous') {
     try {
       const r = await apiFetch(`/api/next_chalan?client_id=${currentClientId}`);
       const data = await r.json();
@@ -666,18 +719,20 @@ async function renderEntryForm(entryId) {
   }
 
   // Live totals box
-  if (ep.table === 'sales' || ep.table === 'purchases' || ep.table === 'transporters') {
+  if (ep.table === 'sales' || ep.table === 'purchases' || ep.table === 'transporters' || ep.table === 'quotations') {
     const totalBox = document.createElement("div");
     totalBox.className = "form-group col-12";
     totalBox.style.padding = "14px";
     totalBox.style.background = "rgba(99,102,241,0.1)";
     totalBox.style.borderRadius = "8px";
+    const totalLabel = ep.table === 'quotations' ? 'Total Quotation Price:' : 'Calculated Total:';
+    const dueRowDisplay = ep.table === 'quotations' ? 'none' : 'flex';
     totalBox.innerHTML = `
       <div style="display:flex; justify-content:space-between; align-items:center;">
-        <span style="font-weight:600; color:var(--accent-cyan);">Calculated Total:</span>
+        <span style="font-weight:600; color:var(--accent-cyan);">${totalLabel}</span>
         <h2 id="liveCalculatedTotal" style="color:var(--accent-emerald);">BDT 0.00</h2>
       </div>
-      <div style="display:flex; justify-content:space-between; margin-top:8px; font-size:12px; color:var(--text-muted);">
+      <div style="display:${dueRowDisplay}; justify-content:space-between; margin-top:8px; font-size:12px; color:var(--text-muted);">
         <span>Suggested Due (Total − Advance):</span>
         <span id="liveCalculatedDue">BDT 0.00</span>
       </div>
@@ -713,7 +768,55 @@ function buildLineItemRow(entryId, idx) {
     return g;
   };
 
-  if (entryId === "new_sale") {
+  const isPrevious = currentRecordMode === "Previous" && (entryId === "new_sale" || entryId === "new_purchase");
+
+  if (isPrevious) {
+    // Historical backfill — plain manual inputs only, no inventory/product catalog linkage.
+    const gProduct = mkGroup(4, `Product #${idx + 1} Type *`);
+    const inProduct = document.createElement("input");
+    inProduct.type = "text"; inProduct.className = "form-control"; inProduct.id = `li_product_type_${idx}`;
+    gProduct.appendChild(inProduct);
+
+    const gSize = mkGroup(2, "Size");
+    const inSize = document.createElement("input");
+    inSize.type = "text"; inSize.className = "form-control"; inSize.id = `li_size_${idx}`;
+    gSize.appendChild(inSize);
+
+    if (entryId === "new_sale") {
+      const gCost = mkGroup(2, "Cost Price");
+      const inCost = document.createElement("input");
+      inCost.type = "number"; inCost.step = "any"; inCost.className = "form-control"; inCost.id = `li_cost_price_${idx}`; inCost.value = 0;
+      gCost.appendChild(inCost);
+
+      const gQty = mkGroup(2, "Qty *");
+      const inQty = document.createElement("input");
+      inQty.type = "number"; inQty.step = "any"; inQty.className = "form-control"; inQty.id = `li_received_quantity_${idx}`; inQty.value = 0;
+      inQty.oninput = () => recalcLineItemTotals(entryId);
+      gQty.appendChild(inQty);
+
+      const gPrice = mkGroup(2, "Sale Price *");
+      const inPrice = document.createElement("input");
+      inPrice.type = "number"; inPrice.step = "any"; inPrice.className = "form-control"; inPrice.id = `li_sale_unit_price_${idx}`; inPrice.value = 0;
+      inPrice.oninput = () => recalcLineItemTotals(entryId);
+      gPrice.appendChild(inPrice);
+
+      row.appendChild(gProduct); row.appendChild(gSize); row.appendChild(gCost); row.appendChild(gQty); row.appendChild(gPrice);
+    } else {
+      const gQty = mkGroup(3, "Quantity *");
+      const inQty = document.createElement("input");
+      inQty.type = "number"; inQty.step = "any"; inQty.className = "form-control"; inQty.id = `li_quantity_${idx}`; inQty.value = 0;
+      inQty.oninput = () => recalcLineItemTotals(entryId);
+      gQty.appendChild(inQty);
+
+      const gPrice = mkGroup(3, "Unit Price *");
+      const inPrice = document.createElement("input");
+      inPrice.type = "number"; inPrice.step = "any"; inPrice.className = "form-control"; inPrice.id = `li_unit_price_${idx}`; inPrice.value = 0;
+      inPrice.oninput = () => recalcLineItemTotals(entryId);
+      gPrice.appendChild(inPrice);
+
+      row.appendChild(gProduct); row.appendChild(gSize); row.appendChild(gQty); row.appendChild(gPrice);
+    }
+  } else if (entryId === "new_sale") {
     const gProduct = mkGroup(4, `Product #${idx + 1} (from Inventory)`);
     const selProduct = document.createElement("select");
     selProduct.className = "form-control";
@@ -761,6 +864,56 @@ function buildLineItemRow(entryId, idx) {
     gPrice.appendChild(inPrice);
 
     row.appendChild(gProduct); row.appendChild(gSize); row.appendChild(gCost); row.appendChild(gQty); row.appendChild(gPrice);
+  } else if (entryId === "new_quotation") {
+    const gProduct = mkGroup(3, `Product #${idx + 1} Type *`);
+    const selProduct = document.createElement("select");
+    selProduct.className = "form-control";
+    selProduct.id = `li_product_type_${idx}`;
+    selProduct.innerHTML = `<option value="">-- Select Product --</option>`;
+    productsCache.forEach(p => {
+      const o = document.createElement("option");
+      o.value = p.product_type;
+      o.dataset.size = p.size;
+      o.dataset.price = p.unit_price;
+      o.dataset.origin = p.origin || "";
+      o.innerText = `${p.product_type} — ${p.size} (BDT ${parseFloat(p.unit_price).toFixed(2)})`;
+      selProduct.appendChild(o);
+    });
+    selProduct.onchange = () => {
+      const opt = selProduct.options[selProduct.selectedIndex];
+      const sizeEl = document.getElementById(`li_size_${idx}`);
+      const priceEl = document.getElementById(`li_unit_price_${idx}`);
+      const originEl = document.getElementById(`li_origin_${idx}`);
+      if (sizeEl) sizeEl.value = opt.dataset.size || "";
+      if (priceEl && opt.dataset.price) priceEl.value = opt.dataset.price;
+      if (originEl) originEl.value = opt.dataset.origin || "";
+      recalcLineItemTotals(entryId);
+    };
+    gProduct.appendChild(selProduct);
+
+    const gSize = mkGroup(2, "Size");
+    const inSize = document.createElement("input");
+    inSize.type = "text"; inSize.className = "form-control"; inSize.id = `li_size_${idx}`;
+    gSize.appendChild(inSize);
+
+    const gOrigin = mkGroup(2, "Origin");
+    const inOrigin = document.createElement("input");
+    inOrigin.type = "text"; inOrigin.className = "form-control"; inOrigin.id = `li_origin_${idx}`;
+    gOrigin.appendChild(inOrigin);
+
+    const gQty = mkGroup(2, "Qty *");
+    const inQty = document.createElement("input");
+    inQty.type = "number"; inQty.step = "any"; inQty.className = "form-control"; inQty.id = `li_quantity_${idx}`; inQty.value = 0;
+    inQty.oninput = () => recalcLineItemTotals(entryId);
+    gQty.appendChild(inQty);
+
+    const gPrice = mkGroup(3, "Unit Price *");
+    const inPrice = document.createElement("input");
+    inPrice.type = "number"; inPrice.step = "any"; inPrice.className = "form-control"; inPrice.id = `li_unit_price_${idx}`; inPrice.value = 0;
+    inPrice.oninput = () => recalcLineItemTotals(entryId);
+    gPrice.appendChild(inPrice);
+
+    row.appendChild(gProduct); row.appendChild(gSize); row.appendChild(gOrigin); row.appendChild(gQty); row.appendChild(gPrice);
   } else {
     const gProduct = mkGroup(4, `Product #${idx + 1} Type *`);
     const selProduct = document.createElement("select");
@@ -900,6 +1053,14 @@ function collectLineItems(entryId) {
         received_quantity: document.getElementById(`li_received_quantity_${idx}`)?.value || 0,
         sale_unit_price: document.getElementById(`li_sale_unit_price_${idx}`)?.value || 0
       });
+    } else if (entryId === "new_quotation") {
+      items.push({
+        product_type: document.getElementById(`li_product_type_${idx}`)?.value || "",
+        size: document.getElementById(`li_size_${idx}`)?.value || "",
+        origin: document.getElementById(`li_origin_${idx}`)?.value || "",
+        quantity: document.getElementById(`li_quantity_${idx}`)?.value || 0,
+        unit_price: document.getElementById(`li_unit_price_${idx}`)?.value || 0
+      });
     } else {
       items.push({
         product_type: document.getElementById(`li_product_type_${idx}`)?.value || "",
@@ -910,6 +1071,64 @@ function collectLineItems(entryId) {
     }
   });
   return items;
+}
+
+// Auto-fill Sales Entry's buyer + product line items from an approved
+// quotation. Leaving the dropdown on "-- No Quotation --" changes nothing —
+// the client keys in the sale manually as before.
+async function applyQuotationToSale(quotationNo) {
+  if (!quotationNo) return;
+  try {
+    const res = await apiFetch(`/api/quotation/${encodeURIComponent(quotationNo)}?client_id=${currentClientId}`);
+    const data = await res.json();
+    if (data.status === "error") { alert("Quotation not found."); return; }
+
+    const buyerSel = document.getElementById("input_buyer_name");
+    if (buyerSel) {
+      let matched = Array.from(buyerSel.options).find(o => o.value === data.customer_name);
+      if (!matched) {
+        matched = document.createElement("option");
+        matched.value = data.customer_name;
+        matched.innerText = data.customer_name;
+        buyerSel.appendChild(matched);
+      }
+      buyerSel.selectedIndex = Array.from(buyerSel.options).indexOf(matched);
+      const contactEl = document.getElementById("input_contact_number");
+      if (contactEl) contactEl.value = matched.dataset.contact || "";
+    }
+
+    const items = data.items || [];
+    const countEl = document.getElementById("lineItemCount");
+    if (countEl) countEl.value = items.length || 1;
+    renderLineItemRows("new_sale", items.length || 1);
+
+    items.forEach((item, idx) => {
+      const selProduct = document.getElementById(`li_product_type_${idx}`);
+      if (selProduct) {
+        let matched = Array.from(selProduct.options).find(
+          o => o.value === item.product_type && (o.dataset.size || "") === (item.size || "")
+        );
+        if (!matched) {
+          matched = document.createElement("option");
+          matched.value = item.product_type;
+          matched.dataset.size = item.size || "";
+          matched.dataset.cost = 0;
+          matched.innerText = `${item.product_type} — ${item.size || ''} (from quotation — not currently in stock)`;
+          selProduct.appendChild(matched);
+        }
+        selProduct.selectedIndex = Array.from(selProduct.options).indexOf(matched);
+      }
+      const sizeEl = document.getElementById(`li_size_${idx}`);
+      if (sizeEl) sizeEl.value = item.size || "";
+      const qtyEl = document.getElementById(`li_received_quantity_${idx}`);
+      if (qtyEl) qtyEl.value = item.quantity || 0;
+      const priceEl = document.getElementById(`li_sale_unit_price_${idx}`);
+      if (priceEl) priceEl.value = item.unit_price || 0;
+    });
+    recalcLineItemTotals("new_sale");
+  } catch (err) {
+    alert("Failed to load quotation: " + err.message);
+  }
 }
 
 async function handleFormSubmit(event) {
@@ -940,9 +1159,11 @@ async function handleFormSubmit(event) {
       const countNote = data.line_count > 1 ? ` (${data.line_count} products)` : "";
       const msg = data.chalan_no ? `Sale saved (Chalan #${data.chalan_no})${countNote}.${pendingNote}` :
                   data.input_invoice_no ? `Purchase saved (Invoice #${data.input_invoice_no})${countNote}.${pendingNote}` :
+                  data.quotation_no ? `Quotation saved (${data.quotation_no})${countNote} — pending admin approval.` :
                   `Record saved to table '${data.table}'.`;
       alert(msg);
       if (data.chalan_no) openInvoiceModal(data.chalan_no);
+      if (data.quotation_no) openQuotationModal(data.quotation_no);
       await refreshLookups();
       resetCurrentForm();
     } else {
@@ -973,6 +1194,14 @@ async function renderReportView(reportId) {
       if (sel) sel.value = "All";
     }
   }
+  const recordModeWrap = document.getElementById("recordModeFilterWrap");
+  if (recordModeWrap) {
+    recordModeWrap.style.display = rp.supports_record_mode ? "flex" : "none";
+    if (!rp.supports_record_mode) {
+      const sel = document.getElementById("reportRecordModeFilter");
+      if (sel) sel.value = "New";
+    }
+  }
 
   await loadReportData(reportId);
 }
@@ -983,7 +1212,8 @@ const DELETABLE_REPORT_TABLES = {
   transporter_report: "transporters",
   inventory_report: "inventory",
   products_report: "products",
-  customer_report: "customers"
+  customer_report: "customers",
+  quotation_report: "quotations"
 };
 
 // Adjust (due date / advance delta) only makes sense for transaction tables
@@ -1007,12 +1237,14 @@ async function loadReportData(reportId) {
   const dt = document.getElementById("reportDateTo")?.value || "";
   const cust = document.getElementById("reportCustomerFilter")?.value || "";
   const txnType = document.getElementById("reportTxnTypeFilter")?.value || "";
+  const recordMode = document.getElementById("reportRecordModeFilter")?.value || "";
 
   const params = new URLSearchParams({ client_id: currentClientId });
   if (df) params.append("from", df);
   if (dt) params.append("to", dt);
   if (cust) params.append("customer", cust);
   if (txnType && txnType !== "All") params.append("txn_type", txnType);
+  if (recordMode) params.append("record_mode", recordMode);
 
   try {
     const res = await apiFetch(`/api/report/${reportId}?${params.toString()}`);
@@ -1030,7 +1262,11 @@ async function loadReportData(reportId) {
     const canAdjust = adjustTable && currentUser && currentUser.role === 'admin';
     const canEdit = editSpec && currentUser && currentUser.role === 'admin';
     const canDownloadInvoice = reportId === 'sales_report';
-    const showActions = canDelete || canAdjust || canEdit || canDownloadInvoice;
+    const canApproveQuotation = reportId === 'quotation_report' && currentUser && currentUser.role === 'admin';
+    const canPrintQuotation = reportId === 'quotation_report';
+    const canUploadChallan = reportId === 'sales_report';
+    const showActions = canDelete || canAdjust || canEdit || canDownloadInvoice ||
+      canApproveQuotation || canPrintQuotation || canUploadChallan;
 
     const NUM_COLS = new Set(["qty","quantity","unit price","total","advance","due","rent","cost","price","amount","transport cost","profit","revenue","stock valuation","cost price","sale price"]);
     const theadTr = document.getElementById("reportTableHead");
@@ -1063,6 +1299,10 @@ async function loadReportData(reportId) {
             td.innerText = parseFloat(v.toFixed(2));
             td.style.textAlign = "right";
             td.style.fontVariantNumeric = "tabular-nums";
+          } else if (typeof v === "string" && /^https?:\/\//.test(v)) {
+            const a = document.createElement("a");
+            a.href = v; a.target = "_blank"; a.rel = "noopener"; a.innerText = "View File";
+            td.appendChild(a);
           } else {
             td.innerText = v === null || v === undefined ? "" : v;
           }
@@ -1074,6 +1314,15 @@ async function loadReportData(reportId) {
           let html = "";
           if (canDownloadInvoice) {
             html += `<button class="btn btn-secondary" style="padding:4px 10px; font-size:11px; margin-right:6px;" onclick="openInvoiceModal('${row.chalan_no}')"><i class="fa-solid fa-file-invoice"></i> Invoice</button>`;
+          }
+          if (canUploadChallan) {
+            html += `<button class="btn btn-secondary" style="padding:4px 10px; font-size:11px; margin-right:6px;" onclick="promptChallanUpload('${row.chalan_no}', '${(row.buyer_name || '').replace(/'/g, "\\'")}', '${row.sale_date || ''}')"><i class="fa-solid fa-upload"></i> Challan</button>`;
+          }
+          if (canPrintQuotation) {
+            html += `<button class="btn btn-secondary" style="padding:4px 10px; font-size:11px; margin-right:6px;" onclick="openQuotationModal('${row.quotation_no}')"><i class="fa-solid fa-print"></i> Print</button>`;
+          }
+          if (canApproveQuotation && row.status === 'pending') {
+            html += `<button class="btn btn-primary" style="padding:4px 10px; font-size:11px; margin-right:6px;" onclick="approveQuotationRow('${row.quotation_no}')"><i class="fa-solid fa-check"></i> Approve</button>`;
           }
           if (canEdit) {
             html += `<button class="btn btn-secondary" style="padding:4px 10px; font-size:11px; margin-right:6px;" onclick="openEditRecordModalFromReport('${reportId}', ${row.id})"><i class="fa-solid fa-pen-to-square"></i> Edit</button>`;
@@ -1347,7 +1596,62 @@ function clearReportFilters() {
   document.getElementById("reportDateTo").value = "";
   const c = document.getElementById("reportCustomerFilter"); if (c) c.value = "";
   const t = document.getElementById("reportTxnTypeFilter"); if (t) t.value = "All";
+  const r = document.getElementById("reportRecordModeFilter"); if (r) r.value = "New";
   if (currentReportId) loadReportData(currentReportId);
+}
+
+async function approveQuotationRow(quotationNo) {
+  if (!confirm(`Approve quotation ${quotationNo}? It will then be selectable for linking into a Sales Entry.`)) return;
+  try {
+    const res = await apiFetch(`/api/quotation/${encodeURIComponent(quotationNo)}/approve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ client_id: currentClientId })
+    });
+    const data = await res.json();
+    if (data.status === "success") {
+      if (currentReportId) loadReportData(currentReportId);
+    } else {
+      alert("Approval failed: " + data.message);
+    }
+  } catch (err) {
+    alert("Connection error: " + err.message);
+  }
+}
+
+// ---------------- CHALLAN FILE UPLOAD (Google Drive) ----------------
+function promptChallanUpload(chalanNo, buyerName, saleDate) {
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = "image/*,application/pdf";
+  input.style.display = "none";
+  input.onchange = async () => {
+    const file = input.files && input.files[0];
+    document.body.removeChild(input);
+    if (!file) return;
+    const formData = new FormData();
+    formData.append("file", file);
+    formData.append("client_id", currentClientId);
+    formData.append("buyer_name", buyerName || "Customer");
+    formData.append("sale_date", saleDate || "");
+    try {
+      const res = await apiFetch(`/api/sales/${encodeURIComponent(chalanNo)}/challan`, {
+        method: "POST",
+        body: formData
+      });
+      const data = await res.json();
+      if (data.status === "success") {
+        alert("Challan file uploaded to Google Drive.");
+        if (currentReportId) loadReportData(currentReportId);
+      } else {
+        alert("Upload failed: " + data.message);
+      }
+    } catch (err) {
+      alert("Connection error: " + err.message);
+    }
+  };
+  document.body.appendChild(input);
+  input.click();
 }
 
 function filterReportTable() {
@@ -1481,31 +1785,12 @@ async function openInvoiceModal(invoiceRef) {
 
     const padDivider = document.getElementById("padDividerLine");
 
-    if (lh.use_pad_image && lh.pad_image) {
-      // The uploaded pad image IS the page — invoice content prints as an
-      // overlay on top of it (like text on a pre-printed letterhead sheet),
-      // not as a separate block stacked above/below the artwork.
-      padPaper.style.backgroundImage = `url('${lh.pad_image}')`;
-      padPaper.style.backgroundSize = "100% 100%";
-      padPaper.style.backgroundRepeat = "no-repeat";
-      headerArea.style.display = "none";
-      if (padDivider) padDivider.style.display = "none";
-      padPaper.style.paddingTop = `${lh.header_height_px || 140}px`;
-    } else {
-      padPaper.style.backgroundImage = "none";
-      if (padDivider) padDivider.style.display = "";
-
-      if (lh.show_border === false) {
-        headerArea.style.display = "none";
-        padPaper.style.paddingTop = `${lh.header_height_px || 140}px`;
-      } else {
-        headerArea.style.display = "block";
-        padPaper.style.paddingTop = "40px";
-        document.getElementById("padCompanyTitle").innerText = lh.company_name || "";
-        document.getElementById("padSubHeading").innerText = lh.sub_heading || "";
-        document.getElementById("padContactLine").innerText = `${lh.address || ''} | Phone: ${lh.phone || ''}`;
-      }
-    }
+    // The uploaded pad image IS the page — invoice content prints as an
+    // overlay on top of it (like text on a pre-printed letterhead sheet),
+    // not as a separate block stacked above/below the artwork.
+    applyPadBackground(padPaper, headerArea, padDivider, lh, {
+      companyTitleId: "padCompanyTitle", subHeadingId: "padSubHeading", contactLineId: "padContactLine"
+    });
 
     document.getElementById("padCustName").innerText = sale.buyer_name || "-";
     document.getElementById("padCustPhone").innerText = sale.contact_number ? `Phone: ${sale.contact_number}` : "";
@@ -1565,6 +1850,100 @@ function closeInvoiceModal() {
   document.getElementById("invoiceModal").classList.remove("active");
 }
 
+// ---------------- QUOTATION PRINT PAD ----------------
+async function openQuotationModal(quotationNo) {
+  if (!quotationNo) return;
+  try {
+    const res = await apiFetch(`/api/quotation/${encodeURIComponent(quotationNo)}?client_id=${currentClientId}`);
+    const data = await res.json();
+    if (data.status === "error") { alert("Quotation not found."); return; }
+
+    const lh = data.letterhead || {};
+    const padPaper = document.getElementById("quotationPadPaper");
+    const headerArea = document.getElementById("qpHeaderArea");
+    const padDivider = document.getElementById("qpDividerLine");
+
+    applyPadBackground(padPaper, headerArea, padDivider, lh, {
+      companyTitleId: "qpCompanyTitle", subHeadingId: "qpSubHeading", contactLineId: "qpContactLine"
+    });
+
+    document.getElementById("qpCustName").innerText = data.customer_name || "-";
+    document.getElementById("qpInvNo").innerText = data.quotation_no || "-";
+    document.getElementById("qpInvDate").innerText = data.quotation_date || "-";
+
+    const items = data.items || [];
+    const rowsHtml = items.map((item, i) => {
+      const qty = parseFloat(item.quantity || 0);
+      const price = parseFloat(item.unit_price || 0);
+      const rowTotal = qty * price;
+      return `
+      <tr>
+        <td>${i + 1}</td>
+        <td><strong>${item.product_type || '-'}</strong></td>
+        <td>${item.size || '-'}</td>
+        <td>${item.origin || '-'}</td>
+        <td style="text-align:center;">${qty}</td>
+        <td style="text-align:right;">${price.toFixed(2)}</td>
+        <td style="text-align:right;"><strong>${rowTotal.toFixed(2)}</strong></td>
+      </tr>`;
+    }).join('');
+    document.getElementById("qpItemsBody").innerHTML = rowsHtml;
+    document.getElementById("qpGrandTotal").innerText = `BDT ${(data.grand_total || 0).toFixed(2)}`;
+    document.getElementById("qpFooterNote").innerText = lh.footer_note || "Thank you for your business!";
+
+    document.getElementById("quotationModal").classList.add("active");
+  } catch (err) {
+    alert("Failed to load quotation: " + err.message);
+  }
+}
+
+function closeQuotationModal() {
+  document.getElementById("quotationModal").classList.remove("active");
+}
+
+// Shared pad-image/header layout logic used by both the invoice and
+// quotation print pads so alignment stays identical between the two.
+function applyPadBackground(padPaper, headerArea, padDivider, lh, ids) {
+  if (lh.use_pad_image && lh.pad_image) {
+    padPaper.style.backgroundImage = `url('${lh.pad_image}')`;
+    padPaper.style.backgroundSize = "100% 100%";
+    padPaper.style.backgroundRepeat = "no-repeat";
+    headerArea.style.display = "none";
+    if (padDivider) padDivider.style.display = "none";
+    padPaper.style.paddingTop = `${lh.header_height_px || 140}px`;
+    padPaper.style.paddingBottom = `${lh.footer_height_px || 110}px`;
+
+    // Match the container's shape to the actual uploaded pad image so the
+    // 100%/100% background stretch above is lossless. Without this, the
+    // container's height instead followed however much invoice content
+    // there was, squashing/stretching the pad artwork (and shifting its
+    // header/footer bands) a different amount on every print.
+    const img = new Image();
+    img.onload = () => {
+      if (img.naturalWidth && img.naturalHeight) {
+        padPaper.style.aspectRatio = `${img.naturalWidth} / ${img.naturalHeight}`;
+      }
+    };
+    img.src = lh.pad_image;
+  } else {
+    padPaper.style.backgroundImage = "none";
+    padPaper.style.aspectRatio = "auto";
+    padPaper.style.paddingBottom = "0px";
+    if (padDivider) padDivider.style.display = "";
+
+    if (lh.show_border === false) {
+      headerArea.style.display = "none";
+      padPaper.style.paddingTop = `${lh.header_height_px || 140}px`;
+    } else {
+      headerArea.style.display = "block";
+      padPaper.style.paddingTop = "40px";
+      document.getElementById(ids.companyTitleId).innerText = lh.company_name || "";
+      document.getElementById(ids.subHeadingId).innerText = lh.sub_heading || "";
+      document.getElementById(ids.contactLineId).innerText = `${lh.address || ''} | Phone: ${lh.phone || ''}`;
+    }
+  }
+}
+
 // ---------------- LETTERHEAD ----------------
 let currentPadImageDataUrl = "";
 const MAX_PAD_IMAGE_BYTES = 6 * 1024 * 1024;
@@ -1579,6 +1958,7 @@ function populateLetterheadForm() {
   document.getElementById("lhEmail").value = lh.email || "";
   document.getElementById("lhFooterNote").value = lh.footer_note || "";
   document.getElementById("lhHeaderHeight").value = lh.header_height_px || 140;
+  document.getElementById("lhFooterHeight").value = lh.footer_height_px || 110;
   document.getElementById("lhShowBorder").value = lh.show_border !== false ? "true" : "false";
   document.getElementById("lhUsePadImage").checked = !!lh.use_pad_image;
 
@@ -1631,6 +2011,7 @@ async function saveLetterheadSettings(event) {
     email: document.getElementById("lhEmail").value,
     footer_note: document.getElementById("lhFooterNote").value,
     header_height_px: parseInt(document.getElementById("lhHeaderHeight").value || 140),
+    footer_height_px: parseInt(document.getElementById("lhFooterHeight").value || 110),
     show_border: document.getElementById("lhShowBorder").value === "true",
     use_pad_image: document.getElementById("lhUsePadImage").checked,
     pad_image: currentPadImageDataUrl

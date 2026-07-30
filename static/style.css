@@ -795,8 +795,8 @@ input[readonly] { background: rgba(255,255,255,0.02) !important; color: var(--te
   .app-layout, .topbar, .no-print, .modal-header, .login-screen-overlay { display: none !important; }
   /* Hide all modals by default when printing */
   .modal-overlay { display: none !important; }
-  /* Only show the invoice modal if it's actually open */
-  #invoiceModal.active { position: static !important; display: block !important; background: transparent !important; }
+  /* Only show the invoice/quotation modal if it's actually open */
+  #invoiceModal.active, #quotationModal.active { position: static !important; display: block !important; background: transparent !important; }
   .invoice-modal-container { width: 100%; border: none; background: transparent; }
   .business-pad-paper { padding: 0; }
 }

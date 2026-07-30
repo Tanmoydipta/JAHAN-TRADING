@@ -4,6 +4,7 @@ import sys
 import subprocess
 import webbrowser
 import threading
+from datetime import datetime
 from database import (
     init_db, load_config,
     save_entry, save_multi_item_entry, execute_report, get_invoice_data,
@@ -14,8 +15,11 @@ from database import (
     delete_entry, delete_user, update_user, update_record,
     adjust_entry, list_invoice_refs,
     create_session_token, verify_session_token, revoke_session_token,
-    get_letterhead_settings, save_letterhead_settings
+    get_letterhead_settings, save_letterhead_settings,
+    list_quotation_refs, get_quotation_data, approve_quotation,
+    save_challan_upload
 )
+from google_drive import upload_challan_to_drive
 
 
 def get_base_dir():
@@ -269,9 +273,11 @@ def api_get_report(report_id):
         date_to = request.args.get('to') or None
         customer = request.args.get('customer') or None
         txn_type = request.args.get('txn_type') or None
+        record_mode = request.args.get('record_mode') or None
         res = execute_report(report_id, client_id=client_id,
                              date_from=date_from, date_to=date_to,
-                             customer=customer, txn_type=txn_type)
+                             customer=customer, txn_type=txn_type,
+                             record_mode=record_mode)
         return jsonify(res)
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 400
@@ -376,6 +382,71 @@ def api_update_user(user_id):
         return jsonify(update_user(user_id, request.current_user['username'], new_username, new_password))
     except ValueError as e:
         return jsonify({"status": "error", "message": str(e)}), 403
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+
+
+@app.route('/api/quotation_refs', methods=['GET'])
+def api_quotation_refs():
+    client_id = _scoped_client_id(request.args.get('client_id'))
+    if client_id is None:
+        return _forbidden()
+    try:
+        return jsonify(list_quotation_refs(client_id))
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+
+
+@app.route('/api/quotation/<quotation_no>', methods=['GET'])
+def api_get_quotation(quotation_no):
+    client_id = _scoped_client_id(request.args.get('client_id'))
+    if client_id is None:
+        return _forbidden()
+    res = get_quotation_data(quotation_no, client_id=client_id)
+    if not res:
+        return jsonify({"status": "error", "message": "Quotation not found"}), 404
+    return jsonify(res)
+
+
+@app.route('/api/quotation/<quotation_no>/approve', methods=['POST'])
+def api_approve_quotation(quotation_no):
+    data = request.json or {}
+    client_id = _scoped_client_id(data.get('client_id'))
+    if client_id is None:
+        return _forbidden()
+    requested_by = request.current_user['username']
+    try:
+        return jsonify(approve_quotation(quotation_no, requested_by, client_id=client_id))
+    except ValueError as e:
+        return jsonify({"status": "error", "message": str(e)}), 403
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+
+
+@app.route('/api/sales/<chalan_no>/challan', methods=['POST'])
+def api_upload_challan(chalan_no):
+    client_id = _scoped_client_id(request.form.get('client_id'))
+    if client_id is None:
+        return _forbidden()
+    file = request.files.get('file')
+    if not file or not file.filename:
+        return jsonify({"status": "error", "message": "No file provided"}), 400
+
+    buyer_name = (request.form.get('buyer_name') or 'Customer').strip()
+    sale_date = (request.form.get('sale_date') or datetime.now().strftime('%Y-%m-%d')).strip()
+    ext = os.path.splitext(file.filename)[1] or '.jpg'
+    safe_buyer = "".join(c if c.isalnum() or c in (' ', '-', '_') else '_' for c in buyer_name).strip()
+    drive_filename = f"{chalan_no}_{safe_buyer}_{sale_date}{ext}"
+
+    try:
+        file_bytes = file.read()
+        uploaded = upload_challan_to_drive(file_bytes, drive_filename, file.mimetype or 'application/octet-stream')
+        uploaded_by = request.current_user['username']
+        result = save_challan_upload(
+            chalan_no, client_id, drive_filename,
+            uploaded['file_id'], uploaded['view_url'], uploaded_by
+        )
+        return jsonify(result)
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 400
 
