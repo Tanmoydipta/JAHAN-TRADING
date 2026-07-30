@@ -1826,28 +1826,62 @@ async function saveReportAsPDF() {
   }
 }
 
-// Single-page PDF export for the invoice/quotation business pad — the pad's
-// aspect ratio is now locked (see applyPadBackground()), so the PDF page
-// size is set to exactly match the captured canvas, no pagination needed.
+// Single-page PDF export for the invoice/quotation business pad. The page
+// is forced to the pad's true physical size — US Letter, 612x792pt/8.5x11in
+// (confirmed from the client's actual reference PDF) — rather than derived
+// from whatever pixel size html2canvas happens to capture. Capturing at a
+// size not proportional to 612:792 (e.g. picking up a scrollbar, or a
+// sub-pixel rounding difference from the CSS aspect-ratio box) was the
+// source of the visible border/misalignment in the exported PDF.
 async function saveElementAsPDF(elementId, filenameBase) {
   const el = document.getElementById(elementId);
   if (!el) return;
+
+  // The modal is normally capped to max-height:90vh (with a scrollbar) so it
+  // fits a small screen — left in place, that cap would compress the pad
+  // below its true 612:792 aspect ratio during capture, and the scrollbar
+  // itself would get rasterized as a stray border. Both are lifted here and
+  // restored afterward.
+  const container = el.closest('.invoice-modal-container');
+  const prevPadOverflow = el.style.overflow;
+  const prevContainerMaxHeight = container ? container.style.maxHeight : null;
+  const prevContainerOverflow = container ? container.style.overflow : null;
+
+  el.style.overflow = "hidden";
+  if (container) {
+    container.style.maxHeight = "none";
+    container.style.overflow = "visible";
+  }
+
   try {
-    const canvas = await html2canvas(el, { scale: 2, backgroundColor: '#ffffff', useCORS: true });
-    const { jsPDF } = window.jspdf;
-    const pdf = new jsPDF({
-      orientation: canvas.width >= canvas.height ? 'landscape' : 'portrait',
-      unit: 'px',
-      format: [canvas.width, canvas.height]
+    const captureWidthPx = Math.round(el.clientWidth) || 850;
+    const captureHeightPx = Math.round(captureWidthPx * PAD_PAGE_HEIGHT_PT / PAD_PAGE_WIDTH_PT);
+
+    const canvas = await html2canvas(el, {
+      scale: 2,
+      backgroundColor: '#ffffff',
+      useCORS: true,
+      width: captureWidthPx,
+      height: captureHeightPx,
+      windowWidth: captureWidthPx,
+      windowHeight: captureHeightPx
     });
+    const { jsPDF } = window.jspdf;
+    const pdf = new jsPDF({ orientation: 'portrait', unit: 'pt', format: [PAD_PAGE_WIDTH_PT, PAD_PAGE_HEIGHT_PT] });
     const imgData = canvas.toDataURL('image/jpeg', 0.95);
-    pdf.addImage(imgData, 'JPEG', 0, 0, canvas.width, canvas.height);
+    pdf.addImage(imgData, 'JPEG', 0, 0, PAD_PAGE_WIDTH_PT, PAD_PAGE_HEIGHT_PT);
     pdf.save(`${(filenameBase || 'Document').replace(/[^\w\-]+/g, '_')}.pdf`);
   } catch (err) {
     // Most likely cause: the pad's background image is hosted somewhere
     // (e.g. Google Drive) that doesn't allow cross-origin canvas reads —
     // Print still works in that case since it doesn't need to read pixels back.
     alert("Could not save PDF (the pad background image may not allow this) — try Print instead. " + err.message);
+  } finally {
+    el.style.overflow = prevPadOverflow;
+    if (container) {
+      container.style.maxHeight = prevContainerMaxHeight;
+      container.style.overflow = prevContainerOverflow;
+    }
   }
 }
 
@@ -1985,6 +2019,17 @@ function closeQuotationModal() {
   document.getElementById("quotationModal").classList.remove("active");
 }
 
+// The client's real pre-printed business pad is US Letter (8.5in x 11in),
+// confirmed by reading the actual page size out of their reference PDF
+// (612 x 792pt exactly). Every pad surface — on-screen modal, browser
+// Print, and the PDF Save export — is locked to this same physical size,
+// rather than derived from whatever pixel proportions an uploaded photo of
+// the pad happens to have (a phone photo's own crop ratio is not
+// necessarily identical to the true paper size, and was the underlying
+// cause of misalignment/an extra border showing up in exports).
+const PAD_PAGE_WIDTH_PT = 612;
+const PAD_PAGE_HEIGHT_PT = 792;
+
 // Shared pad-image/header layout logic used by both the invoice and
 // quotation print pads so alignment stays identical between the two.
 function applyPadBackground(padPaper, headerArea, padDivider, lh, ids) {
@@ -2001,19 +2046,7 @@ function applyPadBackground(padPaper, headerArea, padDivider, lh, ids) {
     if (padDivider) padDivider.style.display = "none";
     padPaper.style.paddingTop = `${lh.header_height_px || 140}px`;
     padPaper.style.paddingBottom = `${lh.footer_height_px || 110}px`;
-
-    // Match the container's shape to the actual uploaded pad image so the
-    // 100%/100% background stretch above is lossless. Without this, the
-    // container's height instead followed however much invoice content
-    // there was, squashing/stretching the pad artwork (and shifting its
-    // header/footer bands) a different amount on every print.
-    const img = new Image();
-    img.onload = () => {
-      if (img.naturalWidth && img.naturalHeight) {
-        padPaper.style.aspectRatio = `${img.naturalWidth} / ${img.naturalHeight}`;
-      }
-    };
-    img.src = lh.pad_image;
+    padPaper.style.aspectRatio = `${PAD_PAGE_WIDTH_PT} / ${PAD_PAGE_HEIGHT_PT}`;
   } else {
     padPaper.style.backgroundImage = "none";
     padPaper.style.aspectRatio = "auto";

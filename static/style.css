@@ -822,6 +822,20 @@ input[readonly] { background: rgba(255,255,255,0.02) !important; color: var(--te
   .modal-overlay { display: none !important; }
   /* Only show the invoice/quotation modal if it's actually open */
   #invoiceModal.active, #quotationModal.active { position: static !important; display: block !important; background: transparent !important; }
-  .invoice-modal-container { width: 100%; border: none !important; box-shadow: none !important; background: transparent; }
-  .business-pad-paper { padding: 0; border: none !important; outline: none !important; box-shadow: none !important; }
+  /* max-height/overflow reset: the modal is normally capped to 90vh (with a
+     scrollbar) so it fits a small screen — in print/export that constraint
+     must not compress the pad below its true aspect ratio. */
+  .invoice-modal-container { width: 100%; max-height: none !important; overflow: visible !important; border: none !important; box-shadow: none !important; background: transparent; }
+  .business-pad-paper { padding: 0; overflow: visible !important; border: none !important; outline: none !important; box-shadow: none !important; }
+}
+
+/* The client's real pre-printed pad is US Letter (8.5in x 11in) — this
+   locks the browser's own Print dialog to that exact page size so it
+   matches the pad physically instead of falling back to the OS/browser's
+   default paper size (often A4 outside the US). Report printing opens its
+   own separate popup window with its own inline <style>/@page (landscape
+   A4), so this rule never affects that. */
+@page {
+  size: 8.5in 11in;
+  margin: 0;
 }
