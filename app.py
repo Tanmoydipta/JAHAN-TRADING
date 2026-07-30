@@ -19,7 +19,7 @@ from database import (
     list_quotation_refs, get_quotation_data, approve_quotation,
     save_challan_upload
 )
-from google_drive import upload_challan_to_drive
+from google_drive import upload_challan_to_drive, upload_letterhead_pad_image
 
 
 def get_base_dir():
@@ -457,6 +457,21 @@ def api_update_letterhead():
         new_letterhead = request.json or {}
         updated = save_letterhead_settings(new_letterhead)
         return jsonify({"status": "success", "letterhead": updated})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+
+
+@app.route('/api/letterhead/pad_image', methods=['POST'])
+def api_upload_letterhead_pad_image():
+    file = request.files.get('file')
+    if not file or not file.filename:
+        return jsonify({"status": "error", "message": "No file provided"}), 400
+    try:
+        file_bytes = file.read()
+        ext = os.path.splitext(file.filename)[1] or '.jpg'
+        uploaded = upload_letterhead_pad_image(file_bytes, f"letterhead_pad{ext}", file.mimetype or 'image/jpeg')
+        updated = save_letterhead_settings({'pad_image': uploaded['view_url']})
+        return jsonify({"status": "success", "pad_image": uploaded['view_url'], "letterhead": updated})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 400
 

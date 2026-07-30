@@ -1,14 +1,23 @@
-# Google Drive Setup — Challan File Uploads
+# Google Drive Setup — Challan Uploads & Business Pad Image
 
-The Sales Report has an **Upload Challan** button on every row. It uploads the
-photo/scan you pick straight to a shared Google Drive folder using a
-**service account** (a robot Google identity, not your personal login) so no
-one has to click through a Google sign-in screen — it works the same on your
-desktop exe and on Render.
+The same one-time setup below powers **two** features:
 
-Files are named `{ChalanNo}_{CustomerName}_{Date}.{ext}` automatically, e.g.
-`000042_Rahman Traders_2026-07-30.jpg`, and all land in **one shared
-"Challans" folder** that you control.
+1. **Sales Report → Upload Challan** button on every row — uploads the
+   photo/scan you pick to a shared Google Drive folder. Files are named
+   `{ChalanNo}_{CustomerName}_{Date}.{ext}` automatically, e.g.
+   `000042_Rahman Traders_2026-07-30.jpg`.
+2. **Business Pad Setup → pad header image** — when you upload/replace the
+   image used as your invoice/quotation letterhead, it now goes to Drive too
+   instead of being stored directly in the database. This is what keeps your
+   Aiven MySQL storage small — a full image can be several MB, but the link
+   saved in the database is just a few bytes.
+
+Both use a **service account** (a robot Google identity, not your personal
+login) so no one has to click through a Google sign-in screen — it works the
+same on your desktop exe and on Render.
+
+Everything lands in **one shared "Challans" folder** that you control (the
+pad image reuses this same folder — there's nothing extra to set up for it).
 
 You only have to do this once. Follow the steps in order.
 
@@ -73,6 +82,11 @@ You only have to do this once. Follow the steps in order.
 4. Go to **Sales Report** → click **Challan** on any row → pick a photo. It
    should upload and a **View File** link will appear in that row's "Challan
    File" column.
+5. Go to **Business Pad Setup** → pick a pad image → **Save Business Pad
+   Settings**. The image uploads to the same Drive folder at save time (not
+   the moment you pick the file), and only the resulting link is stored —
+   check `config.json`'s folder afterward and you'll see a file named
+   `letterhead_pad.jpg`/`.png` there.
 
 ---
 

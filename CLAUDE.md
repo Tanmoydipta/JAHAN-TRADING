@@ -159,34 +159,41 @@ Both `new_sale` and `new_purchase` have a `record_source` field (`type: "select"
 
 Backend (`save_multi_item_entry()` in `database.py`): when `shared.record_source` is `"Previous"` (case-insensitive), the row is saved with `record_source = 'Previous'`, `status = 'authorized'` immediately (no admin authorization queue — there's nothing left to gate), and **no inventory/product-catalog side-effects run at all**, regardless of role. `delete_entry()` mirrors this: it checks `record.record_source` before reversing any inventory adjustment, so deleting a Previous row never wrongly subtracts/adds inventory that was never touched in the first place.
 
-### Print / PDF output
+### Print / Save (PDF) output
 
-`printReportTable()` in `app.js` opens a **new browser window** (`window.open('', '_blank', 'width=1200,height=850')`) and builds a clean white HTML document with:
-- Company letterhead from `systemConfig.letterhead`
-- Report title + active filters as subtitle
-- `border-collapse: collapse` table with zebra striping and right-aligned numeric columns
-- Summary footer (total records + aggregate value)
-- `@page { size: A4 landscape; }` print CSS
-- `setTimeout(() => win.print(), 600)` for DOM readiness
+Every printable surface (invoice pad, quotation pad, report table) has **two separate buttons**: **Print** (opens the OS/browser print dialog, unchanged) and **Save** (generates an actual downloadable `.pdf` file client-side via `html2canvas` + `jsPDF`, both loaded from CDN in `index.html` — no server round-trip).
 
-The main window's `style.css` print block shows `#invoiceModal.active` or `#quotationModal.active` — all other `.modal-overlay` elements are hidden during print to prevent the dark-themed app from leaking into the printout.
+- `saveElementAsPDF(elementId, filenameBase)` — used by the invoice/quotation pads. Since the pad's aspect ratio is now locked (see below), the PDF page size is set to exactly match the captured canvas — one page, no distortion, no pagination math needed.
+- `saveReportAsPDF()` — used by the report toolbar. Reuses `buildReportPrintDocument()` (extracted out of `printReportTable()` so both stay visually identical), renders it into a detached, off-screen `<iframe>` (kept style-isolated from the app's own dark theme), rasterizes it with `html2canvas`, then slices the resulting image across as many A4-landscape pages as the table needs (`jsPDF`'s standard `addImage` + track `heightLeft`/loop `addPage()` pagination recipe) before triggering the download.
+- **Known limitation**: `saveElementAsPDF()`'s canvas capture can fail to include the pad's background image if that image is hosted somewhere that blocks cross-origin canvas reads (no `Access-Control-Allow-Origin`) — this is a real risk now that the pad image can be a Google Drive link (see below). It's wrapped in a try/catch that tells the user to use Print instead in that case; Print is unaffected either way since normal rendering doesn't need to read pixels back.
+
+`printReportTable()` opens a **new browser window** (unchanged from before) and writes `buildReportPrintDocument()`'s HTML into it, then calls `win.print()`. The main window's `style.css` print block shows `#invoiceModal.active` or `#quotationModal.active` — all other `.modal-overlay` elements are hidden during print to prevent the dark-themed app from leaking into the printout.
 
 ### Business pad alignment (invoice + quotation pads)
 
 Both print pads share `applyPadBackground()` (`app.js`) so their header/footer/signature positioning stays identical:
+- **No border**: `.invoice-modal-container` and `.business-pad-paper` are explicitly `border: none` (also reinforced with `!important` inside `@media print`) — there is no framing rectangle around the pad on-screen or in output.
 - **Footer padding**: letterhead settings gained `footer_height_px` (default 110, alongside the existing `header_height_px`) — `paddingBottom` is set to this when `use_pad_image` is on, so invoice/quotation content (signature row, footer note) doesn't run into the pre-printed pad's bottom address bars. Configurable in Business Pad Setup.
 - **Aspect ratio fix**: previously `background-size: 100% 100%` stretched the uploaded pad image to whatever height the invoice content happened to need — a short invoice vs. a long multi-item one would squash/stretch the pad artwork by different amounts, shifting the header/footer bands on every print. `applyPadBackground()` now loads the pad image and sets `padPaper.style.aspectRatio` to the image's own `naturalWidth/naturalHeight`, so the container's shape always matches the image and the 100%/100% stretch is lossless. Content beyond that fixed height scrolls on-screen (`overflow-y: auto`, unchanged) rather than distorting the pad.
-- **Signature labels**: both pads show "Authorised Signature" (left) / "Received Signature" (right) — replacing the old "Customer Signature"/"Authorized Signature" wording.
+- **Signature positioning**: "Authorised Signature" (`.sig-authorised`) and "Received Signature" (`.sig-received`) are **independently absolutely-positioned** (not a shared flex row anymore — that was causing them to stack instead of sit apart) inside `.business-pad-paper` (now `position: relative`). Authorised sits bottom-left, roughly under where the pad's own pre-printed signature block is; Received sits pinned to the bottom-right corner. Both are anchored via `bottom: calc(var(--footer-h, 110px) + Npx)`, where `--footer-h` is set inline in `applyPadBackground()` from the configured `footer_height_px`, so they track that setting if it's adjusted. The exact left/right/bottom offsets (`60px`/`180px` for Authorised, `40px`/`120px` for Received in `style.css`) are estimates from the reference pad image — nudge them in `style.css` (`.sig-authorised`, `.sig-received`) if they don't land exactly right on the real printed pad.
 
-## Google Drive challan uploads (Sales Report)
+## Google Drive integration (challan uploads + letterhead pad image)
 
-Sales Report has an **Upload Challan** button per row (`promptChallanUpload()` in `app.js`) that uploads a photo/scan to a shared Google Drive folder via a **service account** (not per-user OAuth — no browser consent step needed, works headlessly on Render or the packaged exe). See `GOOGLE_DRIVE_SETUP.md` for the full one-time setup walkthrough.
+Two features push files to a **shared Google Drive folder** via a service account (not per-user OAuth — no browser consent step, works headlessly on Render or the packaged exe). See `GOOGLE_DRIVE_SETUP.md` for the full one-time setup walkthrough.
 
-- Config: `config.json → google_drive` = `{"service_account_key_path": ..., "challans_folder_id": ...}` (server-side only, never exposed via `/api/config`, same pattern as `database_config`).
-- `google_drive.py` — `upload_challan_to_drive()` wraps `google-api-python-client`/`google-auth` (imported lazily inside the function so a missing install doesn't break app startup, only the upload call). Raises `ValueError`/`FileNotFoundError` with actionable setup instructions if the key file or folder ID is missing.
-- Files are named `{chalan_no}_{buyer_name}_{sale_date}.{ext}` and all land in **one shared folder** (not per-invoice subfolders).
+- Config: `config.json → google_drive` = `{"service_account_key_path": ..., "challans_folder_id": ...}` (server-side only, never exposed via `/api/config`, same pattern as `database_config`). Both features currently reuse the same one configured folder.
+- `google_drive.py` — `upload_file_to_drive(file_bytes, filename, mime_type, make_public=False)` is the shared primitive; `upload_challan_to_drive()` and `upload_letterhead_pad_image()` are thin wrappers over it. Imports of `google-api-python-client`/`google-auth` are lazy (inside the function) so a missing install doesn't break app startup, only the upload call. Raises `ValueError`/`FileNotFoundError` with actionable setup instructions if the key file or folder ID is missing.
+
+**Sales Report → Upload Challan** (`promptChallanUpload()` in `app.js`, `POST /api/sales/<chalan_no>/challan`):
+- Files are named `{chalan_no}_{buyer_name}_{sale_date}.{ext}` and all land in the shared folder (not per-invoice subfolders). Uploaded with `make_public=False` — the folder is already shared with the business owner's own Google account (they created it), so a plain `webViewLink` is enough.
 - `database.py → save_challan_upload()` upserts into `challan_uploads` keyed by `(client_id, chalan_no)` — a chalan is one physical document even though a multi-product sale spreads it across several `sales` rows, so the attachment lives in its own table rather than being duplicated onto every line item.
 - `sales_report`'s query pulls the link back in via a correlated subquery (same pattern as `transport_cost`): `(SELECT drive_view_url FROM challan_uploads WHERE chalan_no = sales.chalan_no AND client_id = :client_id) as challan_file_url`. The generic report table renderer (`loadReportData()`) auto-links any cell value starting with `http` as a **View File** anchor.
+
+**Business Pad Setup → pad image** (`POST /api/letterhead/pad_image`):
+- **The full image is never stored in the Aiven database** — only the resulting Drive link (a short string) goes into `letterhead_settings.pad_image`. This replaced the old behavior of storing the entire image as base64 text (up to 8MB) directly in that MySQL column, specifically to save Aiven storage.
+- Uploaded with `make_public=True` — unlike challans, this image has to load as a plain `<img>`/`background-image` for *any* logged-in staff member's browser when they open an invoice, which requires the file to be fetchable without a Google login. `upload_letterhead_pad_image()` explicitly grants "anyone with the link, viewer" and returns the direct-content URL format (`drive.google.com/uc?export=view&id=...`), not the Drive viewer-page link.
+- Frontend flow (`app.js`): picking a file only creates an instant local preview (`URL.createObjectURL()`, never sent anywhere) and stores the raw `File` in `pendingPadImageFile`. The actual upload to Drive happens inside `saveLetterheadSettings()` when the form is submitted — it POSTs the file to `/api/letterhead/pad_image` first, gets back the Drive link, then includes that link in the normal JSON `/api/letterhead` save alongside the other fields.
+- `MAX_PAD_IMAGE_B64_CHARS` in `database.py` is now a defensive fallback only (pad_image should always be a short URL going forward) — kept in case something still submits a raw base64 string.
 
 ## Cloud database (Aiven MySQL)
 
@@ -232,7 +239,8 @@ A single Sales or Purchase transaction can now include multiple product line ite
 - `jahan_trading.db` in the project root is a local SQLite leftover from earlier local-mode testing; irrelevant while `mode: mysql` is active.
 - Flask dev server (`app.run(debug=False)`) is used directly — fine for a single-client desktop-style exe, not hardened for concurrent/public use.
 - `app.py` auto-opens the user's default browser 1.2s after the server starts (`threading.Timer` → `webbrowser.open_new`).
-- Google Drive challan upload is code-complete but **not yet live** — `service_account.json`/`challans_folder_id` haven't been provisioned yet (see `GOOGLE_DRIVE_SETUP.md`); until then, the Upload Challan button fails with a clear "not configured" message instead of erroring obscurely.
+- Google Drive integration (challan uploads + letterhead pad image) is code-complete but **not yet live** — `service_account.json`/`challans_folder_id` haven't been provisioned yet (see `GOOGLE_DRIVE_SETUP.md`); until then, both the Upload Challan button and saving a new pad image fail with a clear "not configured" message instead of erroring obscurely.
+- `saveElementAsPDF()`'s client-side PDF capture may render the pad **without** its background image once that image is Drive-hosted, if Drive doesn't send permissive-enough CORS headers for the canvas read — Print is unaffected (see Print/Save section above).
 - `list_products()` previously omitted the `origin` column entirely (a pre-existing bug, unrelated to whoever added the column) — fixed during the quotations work since the quotation line-item auto-fill depends on it.
 
 ## Schema migration pattern

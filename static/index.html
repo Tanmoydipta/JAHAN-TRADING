@@ -9,6 +9,9 @@
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
   <link rel="stylesheet" href="/static/style.css">
+  <!-- Client-side PDF export for the "Save" buttons (invoice/quotation pad + report print) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 </head>
 <body class="dark-theme">
 
@@ -307,6 +310,9 @@
                 <button class="btn btn-primary" onclick="printReportTable()">
                   <i class="fa-solid fa-print"></i> Print
                 </button>
+                <button class="btn btn-secondary" onclick="saveReportAsPDF()">
+                  <i class="fa-solid fa-download"></i> Save
+                </button>
               </div>
             </div>
 
@@ -444,7 +450,7 @@
                   </select>
                 </div>
                 <div class="form-group col-12">
-                  <label>Invoice Pad Header Image (JPG/PNG) — optional, replaces the text header above on the printed invoice</label>
+                  <label>Invoice Pad Header Image (JPG/PNG) — optional, replaces the text header above on the printed invoice. Uploaded to Google Drive on Save (only the link is stored in the database, not the image itself) — requires Drive setup, see GOOGLE_DRIVE_SETUP.md.</label>
                   <input type="file" id="lhPadImageFile" class="form-control" accept="image/jpeg,image/png" onchange="handlePadImageSelected(event)">
                   <div id="lhPadImagePreviewWrap" style="margin-top:10px; display:none; align-items:center; gap:12px;">
                     <img id="lhPadImagePreview" style="max-width:280px; max-height:120px; border-radius:8px; border:1px solid var(--border-color);">
@@ -519,7 +525,10 @@
         <h3><i class="fa-solid fa-file-invoice"></i> Chalan Invoice</h3>
         <div class="modal-actions">
           <button class="btn btn-primary" onclick="window.print()">
-            <i class="fa-solid fa-print"></i> Print / Save PDF
+            <i class="fa-solid fa-print"></i> Print
+          </button>
+          <button class="btn btn-secondary" onclick="saveElementAsPDF('invoicePadPaper', 'Invoice_' + (document.getElementById('padInvNo')?.innerText || 'chalan'))">
+            <i class="fa-solid fa-download"></i> Save
           </button>
           <button class="btn btn-secondary" onclick="closeInvoiceModal()">
             <i class="fa-solid fa-xmark"></i> Close
@@ -582,8 +591,8 @@
         </div>
 
         <div class="pad-signature-row">
-          <div class="sig-box"><div class="sig-line"></div><span>Authorised Signature</span></div>
-          <div class="sig-box"><div class="sig-line"></div><span>Received Signature</span></div>
+          <div class="sig-authorised"><div class="sig-line"></div><span>Authorised Signature</span></div>
+          <div class="sig-received"><div class="sig-line"></div><span>Received Signature</span></div>
         </div>
 
         <div class="pad-footer" id="padFooterNote">Thank you for doing business with Jahan Trading!</div>
@@ -598,7 +607,10 @@
         <h3><i class="fa-solid fa-file-lines"></i> Quotation</h3>
         <div class="modal-actions">
           <button class="btn btn-primary" onclick="window.print()">
-            <i class="fa-solid fa-print"></i> Print / Save PDF
+            <i class="fa-solid fa-print"></i> Print
+          </button>
+          <button class="btn btn-secondary" onclick="saveElementAsPDF('quotationPadPaper', 'Quotation_' + (document.getElementById('qpInvNo')?.innerText || 'quote'))">
+            <i class="fa-solid fa-download"></i> Save
           </button>
           <button class="btn btn-secondary" onclick="closeQuotationModal()">
             <i class="fa-solid fa-xmark"></i> Close
@@ -650,8 +662,8 @@
         </div>
 
         <div class="pad-signature-row">
-          <div class="sig-box"><div class="sig-line"></div><span>Authorised Signature</span></div>
-          <div class="sig-box"><div class="sig-line"></div><span>Received Signature</span></div>
+          <div class="sig-authorised"><div class="sig-line"></div><span>Authorised Signature</span></div>
+          <div class="sig-received"><div class="sig-line"></div><span>Received Signature</span></div>
         </div>
 
         <div class="pad-footer" id="qpFooterNote">Thank you for your business!</div>

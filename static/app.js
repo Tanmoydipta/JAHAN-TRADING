@@ -1682,10 +1682,11 @@ function exportReportCSV() {
   document.body.removeChild(link);
 }
 
-function printReportTable() {
-  if (!currentReportRawData || currentReportRawData.length === 0) {
-    alert("No data to print."); return;
-  }
+// Builds the full standalone HTML document used for both printReportTable()
+// (opened in a real browser window/print dialog) and saveReportAsPDF()
+// (rendered off-screen in an iframe and rasterized into a downloadable PDF)
+// so the two stay visually identical.
+function buildReportPrintDocument() {
   const lh = systemConfig && systemConfig.letterhead ? systemConfig.letterhead : {};
   const companyName = lh.company_name || "JAHAN TRADING CO.";
   const companyAddress = lh.address || "";
@@ -1720,13 +1721,13 @@ function printReportTable() {
   const summaryLabel = document.getElementById('summaryTitle')?.innerText || '';
   const summaryVal = document.getElementById('summaryValue')?.innerText || '';
 
-  const printWin = window.open('', '_blank', 'width=1200,height=850');
-  if (!printWin) { alert("Pop-up blocked — please allow pop-ups for printing."); return; }
-  printWin.document.write(`<!DOCTYPE html><html><head>
+  return {
+    title: reportTitle,
+    html: `<!DOCTYPE html><html><head>
     <meta charset="UTF-8"><title>${reportTitle}</title>
     <style>
       * { box-sizing: border-box; margin: 0; padding: 0; }
-      body { font-family: Arial, Helvetica, sans-serif; font-size: 11px; color: #1a1a1a; padding: 24px; }
+      body { font-family: Arial, Helvetica, sans-serif; font-size: 11px; color: #1a1a1a; padding: 24px; background: #fff; }
       .header { border-bottom: 2px solid #0f172a; padding-bottom: 10px; margin-bottom: 14px; }
       .header h1 { font-size: 20px; font-weight: 800; color: #0f172a; }
       .header h2 { font-size: 13px; font-weight: 600; color: #475569; margin-top: 2px; }
@@ -1761,10 +1762,93 @@ function printReportTable() {
       <span class="count">Total Records: ${currentReportRawData.length}</span>
       ${summaryLabel} ${summaryVal}
     </div>
-  </body></html>`);
+  </body></html>`
+  };
+}
+
+function printReportTable() {
+  if (!currentReportRawData || currentReportRawData.length === 0) {
+    alert("No data to print."); return;
+  }
+  const doc = buildReportPrintDocument();
+  const printWin = window.open('', '_blank', 'width=1200,height=850');
+  if (!printWin) { alert("Pop-up blocked — please allow pop-ups for printing."); return; }
+  printWin.document.write(doc.html);
   printWin.document.close();
   printWin.focus();
   setTimeout(() => { printWin.print(); }, 600);
+}
+
+// "Save" renders the same report document off-screen in a hidden iframe
+// (kept style-isolated from the app's own dark theme), rasterizes it with
+// html2canvas, and slices the result across as many A4 pages as needed —
+// producing an actual downloadable PDF file instead of going through the
+// browser's print dialog.
+async function saveReportAsPDF() {
+  if (!currentReportRawData || currentReportRawData.length === 0) {
+    alert("No data to save."); return;
+  }
+  const doc = buildReportPrintDocument();
+  const iframe = document.createElement('iframe');
+  iframe.style.cssText = "position:fixed; left:-99999px; top:0; width:1200px; height:800px; border:none;";
+  document.body.appendChild(iframe);
+
+  try {
+    iframe.contentDocument.open();
+    iframe.contentDocument.write(doc.html);
+    iframe.contentDocument.close();
+    await new Promise(resolve => setTimeout(resolve, 400));
+
+    const canvas = await html2canvas(iframe.contentDocument.body, { scale: 2, backgroundColor: '#ffffff' });
+    const { jsPDF } = window.jspdf;
+    const pdf = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+    const pageWidth = pdf.internal.pageSize.getWidth();
+    const pageHeight = pdf.internal.pageSize.getHeight();
+    const imgWidth = pageWidth;
+    const imgHeight = canvas.height * imgWidth / canvas.width;
+    const imgData = canvas.toDataURL('image/jpeg', 0.95);
+
+    let heightLeft = imgHeight;
+    let position = 0;
+    pdf.addImage(imgData, 'JPEG', 0, position, imgWidth, imgHeight);
+    heightLeft -= pageHeight;
+    while (heightLeft > 0) {
+      position = heightLeft - imgHeight;
+      pdf.addPage();
+      pdf.addImage(imgData, 'JPEG', 0, position, imgWidth, imgHeight);
+      heightLeft -= pageHeight;
+    }
+    pdf.save(`${doc.title.replace(/[^\w\-]+/g, '_')}_${currentClientId}.pdf`);
+  } catch (err) {
+    alert("Could not save PDF: " + err.message);
+  } finally {
+    document.body.removeChild(iframe);
+  }
+}
+
+// Single-page PDF export for the invoice/quotation business pad — the pad's
+// aspect ratio is now locked (see applyPadBackground()), so the PDF page
+// size is set to exactly match the captured canvas, no pagination needed.
+async function saveElementAsPDF(elementId, filenameBase) {
+  const el = document.getElementById(elementId);
+  if (!el) return;
+  try {
+    const canvas = await html2canvas(el, { scale: 2, backgroundColor: '#ffffff', useCORS: true });
+    const { jsPDF } = window.jspdf;
+    const pdf = new jsPDF({
+      orientation: canvas.width >= canvas.height ? 'landscape' : 'portrait',
+      unit: 'px',
+      format: [canvas.width, canvas.height]
+    });
+    const imgData = canvas.toDataURL('image/jpeg', 0.95);
+    pdf.addImage(imgData, 'JPEG', 0, 0, canvas.width, canvas.height);
+    pdf.save(`${(filenameBase || 'Document').replace(/[^\w\-]+/g, '_')}.pdf`);
+  } catch (err) {
+    // Most likely cause: the pad's background image is hosted somewhere
+    // (e.g. Google Drive) that doesn't allow cross-origin canvas reads —
+    // Print still works in that case since it doesn't need to read pixels back.
+    alert("Could not save PDF (the pad background image may not allow this) — try Print instead. " + err.message);
+  }
 }
 
 // ---------------- INVOICE ----------------
@@ -1904,6 +1988,11 @@ function closeQuotationModal() {
 // Shared pad-image/header layout logic used by both the invoice and
 // quotation print pads so alignment stays identical between the two.
 function applyPadBackground(padPaper, headerArea, padDivider, lh, ids) {
+  // Signature positions (see .sig-authorised/.sig-received in style.css) are
+  // pinned relative to the bottom of the pad using this footer height, so
+  // they stay clear of the pad's pre-printed address bars in both modes.
+  padPaper.style.setProperty("--footer-h", `${lh.footer_height_px || 110}px`);
+
   if (lh.use_pad_image && lh.pad_image) {
     padPaper.style.backgroundImage = `url('${lh.pad_image}')`;
     padPaper.style.backgroundSize = "100% 100%";
@@ -1945,7 +2034,14 @@ function applyPadBackground(padPaper, headerArea, padDivider, lh, ids) {
 }
 
 // ---------------- LETTERHEAD ----------------
+// currentPadImageDataUrl holds the *saved* Google Drive link for the pad
+// image (what's actually persisted in letterhead_settings.pad_image — a
+// short URL, not the image itself, so the Aiven database never stores the
+// full picture). pendingPadImageFile holds a newly-picked file that hasn't
+// been uploaded yet; it's only uploaded to Drive when the form is saved,
+// and the local <img> preview uses a throwaway object URL until then.
 let currentPadImageDataUrl = "";
+let pendingPadImageFile = null;
 const MAX_PAD_IMAGE_BYTES = 6 * 1024 * 1024;
 
 function populateLetterheadForm() {
@@ -1963,12 +2059,14 @@ function populateLetterheadForm() {
   document.getElementById("lhUsePadImage").checked = !!lh.use_pad_image;
 
   currentPadImageDataUrl = lh.pad_image || "";
+  pendingPadImageFile = null;
   updatePadImagePreview();
 }
 
 function updatePadImagePreview() {
   const wrap = document.getElementById("lhPadImagePreviewWrap");
   const img = document.getElementById("lhPadImagePreview");
+  if (img.src && img.src.startsWith("blob:")) URL.revokeObjectURL(img.src);
   if (currentPadImageDataUrl) {
     img.src = currentPadImageDataUrl;
     wrap.style.display = "flex";
@@ -1986,16 +2084,19 @@ function handlePadImageSelected(event) {
     event.target.value = "";
     return;
   }
-  const reader = new FileReader();
-  reader.onload = () => {
-    currentPadImageDataUrl = reader.result;
-    updatePadImagePreview();
-  };
-  reader.readAsDataURL(file);
+  // Instant local preview only — nothing is uploaded yet. The actual upload
+  // to Google Drive happens when the form is saved (see saveLetterheadSettings()).
+  pendingPadImageFile = file;
+  const wrap = document.getElementById("lhPadImagePreviewWrap");
+  const img = document.getElementById("lhPadImagePreview");
+  if (img.src && img.src.startsWith("blob:")) URL.revokeObjectURL(img.src);
+  img.src = URL.createObjectURL(file);
+  wrap.style.display = "flex";
 }
 
 function removePadImage() {
   currentPadImageDataUrl = "";
+  pendingPadImageFile = null;
   document.getElementById("lhPadImageFile").value = "";
   document.getElementById("lhUsePadImage").checked = false;
   updatePadImagePreview();
@@ -2003,6 +2104,25 @@ function removePadImage() {
 
 async function saveLetterheadSettings(event) {
   event.preventDefault();
+
+  if (pendingPadImageFile) {
+    const fd = new FormData();
+    fd.append("file", pendingPadImageFile);
+    try {
+      const uploadRes = await apiFetch("/api/letterhead/pad_image", { method: "POST", body: fd });
+      const uploadData = await uploadRes.json();
+      if (uploadData.status !== "success") {
+        alert("Failed to upload pad image to Google Drive: " + uploadData.message);
+        return;
+      }
+      currentPadImageDataUrl = uploadData.pad_image;
+      pendingPadImageFile = null;
+    } catch (err) {
+      alert("Connection error uploading pad image: " + err.message);
+      return;
+    }
+  }
+
   const payload = {
     company_name: document.getElementById("lhCompanyName").value,
     sub_heading: document.getElementById("lhSubHeading").value,
@@ -2025,6 +2145,7 @@ async function saveLetterheadSettings(event) {
     const data = await res.json();
     if (data.status === "success") {
       systemConfig.letterhead = data.letterhead;
+      updatePadImagePreview();
       alert("Letterhead settings updated successfully!");
     } else {
       alert("Failed to update letterhead: " + data.message);

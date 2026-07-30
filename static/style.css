@@ -622,7 +622,7 @@ input[readonly] { background: rgba(255,255,255,0.02) !important; color: var(--te
   max-height: 90vh;
   background: #111625;
   border-radius: var(--radius);
-  border: 1px solid var(--border-color);
+  border: none;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -641,12 +641,16 @@ input[readonly] { background: rgba(255,255,255,0.02) !important; color: var(--te
 
 /* BUSINESS PAD PAPER (PRINT DESIGN) */
 .business-pad-paper {
+  position: relative;
   background: #ffffff;
   color: #1a1a1a;
   padding: 40px 50px;
   overflow-y: auto;
   font-family: 'Outfit', sans-serif;
   line-height: 1.4;
+  border: none;
+  outline: none;
+  box-shadow: none;
   /* Without this, browsers omit CSS background-images from printed output
      by default — silently dropping an uploaded pad image at print time. */
   -webkit-print-color-adjust: exact;
@@ -676,8 +680,23 @@ input[readonly] { background: rgba(255,255,255,0.02) !important; color: var(--te
 .tot-line { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px dashed #e2e8f0; }
 .tot-line.grand-total { font-size: 15px; font-weight: 800; color: #0f172a; border-bottom: 2px solid #0f172a; margin-top: 6px; padding-top: 6px; }
 
-.pad-signature-row { display: flex; justify-content: space-between; margin-top: 50px; }
-.sig-box { width: 200px; text-align: center; font-size: 11px; color: #64748b; }
+/* Signatures are pinned to fixed spots on the physical pad rather than
+   flowing after the totals table — on a pre-printed pad, "Authorised
+   Signature" must sit directly under the pad's own pre-printed signature
+   block (bottom-left), while "Received Signature" belongs pinned to the
+   bottom-right corner. --footer-h is set inline (see applyPadBackground())
+   from the letterhead's configured footer_height_px, so these track it if
+   that setting is adjusted. */
+.pad-signature-row { position: static; margin-top: 50px; }
+.sig-authorised, .sig-received {
+  position: absolute;
+  width: 200px;
+  text-align: center;
+  font-size: 11px;
+  color: #64748b;
+}
+.sig-authorised { left: 60px; bottom: calc(var(--footer-h, 110px) + 70px); }
+.sig-received { right: 40px; bottom: calc(var(--footer-h, 110px) + 10px); text-align: right; }
 .sig-line { height: 1px; background: #94a3b8; margin-bottom: 6px; }
 
 .pad-footer { text-align: center; font-size: 10px; color: #64748b; border-top: 1px solid #e2e8f0; padding-top: 10px; margin-top: 30px; }
@@ -771,16 +790,22 @@ input[readonly] { background: rgba(255,255,255,0.02) !important; color: var(--te
   }
 
   .pad-meta-row,
-  .pad-totals-row,
-  .pad-signature-row {
+  .pad-totals-row {
     flex-direction: column;
     gap: 12px;
   }
 
   .pad-notes-box,
-  .pad-totals-box,
-  .sig-box {
+  .pad-totals-box {
     width: 100%;
+  }
+
+  /* Signatures stay pinned to the pad's fixed corners even on narrow
+     screens — the pad is a fixed-aspect-ratio print document, not a
+     reflowing page, so there's nothing to stack vertically here. */
+  .sig-authorised, .sig-received {
+    width: 140px;
+    font-size: 10px;
   }
 
   .inv-title,
@@ -797,6 +822,6 @@ input[readonly] { background: rgba(255,255,255,0.02) !important; color: var(--te
   .modal-overlay { display: none !important; }
   /* Only show the invoice/quotation modal if it's actually open */
   #invoiceModal.active, #quotationModal.active { position: static !important; display: block !important; background: transparent !important; }
-  .invoice-modal-container { width: 100%; border: none; background: transparent; }
-  .business-pad-paper { padding: 0; }
+  .invoice-modal-container { width: 100%; border: none !important; box-shadow: none !important; background: transparent; }
+  .business-pad-paper { padding: 0; border: none !important; outline: none !important; box-shadow: none !important; }
 }

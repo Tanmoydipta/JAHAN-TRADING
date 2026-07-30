@@ -56,9 +56,20 @@ def _get_drive_service():
     return service, folder_id
 
 
-def upload_challan_to_drive(file_bytes, filename, mime_type):
-    """Uploads a challan photo/scan to the shared Challans Drive folder.
-    Returns {"file_id": ..., "view_url": ...}."""
+def upload_file_to_drive(file_bytes, filename, mime_type, make_public=False):
+    """Uploads a file into the configured shared Drive folder.
+
+    make_public=False (challans): the folder is already shared with the
+    business owner's own Google account (they created it), so a plain
+    webViewLink is enough for them to open it manually — no need to widen
+    access beyond that.
+
+    make_public=True (letterhead pad image): the browser has to load this
+    as a plain <img>/background-image for *any* logged-in staff member
+    printing an invoice, which requires the file to be fetchable without a
+    Google login — so we explicitly grant "anyone with the link, viewer"
+    and return the direct-content URL format instead of the view-page link.
+    """
     from googleapiclient.http import MediaIoBaseUpload
 
     service, folder_id = _get_drive_service()
@@ -67,4 +78,27 @@ def upload_challan_to_drive(file_bytes, filename, mime_type):
     created = service.files().create(
         body=file_metadata, media_body=media, fields='id, webViewLink'
     ).execute()
-    return {"file_id": created['id'], "view_url": created.get('webViewLink')}
+    file_id = created['id']
+    view_url = created.get('webViewLink')
+
+    if make_public:
+        service.permissions().create(
+            fileId=file_id, body={'type': 'anyone', 'role': 'reader'}
+        ).execute()
+        view_url = f"https://drive.google.com/uc?export=view&id={file_id}"
+
+    return {"file_id": file_id, "view_url": view_url}
+
+
+def upload_challan_to_drive(file_bytes, filename, mime_type):
+    """Uploads a challan photo/scan to the shared Challans Drive folder.
+    Returns {"file_id": ..., "view_url": ...}."""
+    return upload_file_to_drive(file_bytes, filename, mime_type, make_public=False)
+
+
+def upload_letterhead_pad_image(file_bytes, filename, mime_type):
+    """Uploads the business pad header image so it can be embedded as a
+    background-image in the invoice/quotation pads for any logged-in user.
+    Returns {"file_id": ..., "view_url": ...} — view_url is a direct-content
+    link (drive.google.com/uc?export=view), not the Drive viewer page."""
+    return upload_file_to_drive(file_bytes, filename, mime_type, make_public=True)
