@@ -2030,6 +2030,21 @@ function closeQuotationModal() {
 const PAD_PAGE_WIDTH_PT = 612;
 const PAD_PAGE_HEIGHT_PT = 792;
 
+// letterhead_settings.pad_image stores a bare Google Drive file_id (not a
+// URL) — Drive's direct-content URLs send Cross-Origin-Resource-Policy:
+// same-site, which blocks a browser from loading them as a background-image
+// on any other site, ours included (confirmed by testing: the URL works
+// fine as a full-page navigation but silently fails to load as an <img>
+// src). Routing through our own /api/letterhead/pad_image_proxy sidesteps
+// that entirely since the browser then only talks to our own origin.
+// A handful of legacy values (a full data: URL or an old direct Drive URL,
+// from before this fix) are passed through unchanged rather than mangled.
+function padImageSrc(padImage) {
+  if (!padImage) return "";
+  if (padImage.startsWith("data:") || padImage.startsWith("http")) return padImage;
+  return `/api/letterhead/pad_image_proxy?id=${encodeURIComponent(padImage)}`;
+}
+
 // Shared pad-image/header layout logic used by both the invoice and
 // quotation print pads so alignment stays identical between the two.
 function applyPadBackground(padPaper, headerArea, padDivider, lh, ids) {
@@ -2039,7 +2054,7 @@ function applyPadBackground(padPaper, headerArea, padDivider, lh, ids) {
   padPaper.style.setProperty("--footer-h", `${lh.footer_height_px || 110}px`);
 
   if (lh.use_pad_image && lh.pad_image) {
-    padPaper.style.backgroundImage = `url('${lh.pad_image}')`;
+    padPaper.style.backgroundImage = `url('${padImageSrc(lh.pad_image)}')`;
     padPaper.style.backgroundSize = "100% 100%";
     padPaper.style.backgroundRepeat = "no-repeat";
     headerArea.style.display = "none";
@@ -2101,7 +2116,7 @@ function updatePadImagePreview() {
   const img = document.getElementById("lhPadImagePreview");
   if (img.src && img.src.startsWith("blob:")) URL.revokeObjectURL(img.src);
   if (currentPadImageDataUrl) {
-    img.src = currentPadImageDataUrl;
+    img.src = padImageSrc(currentPadImageDataUrl);
     wrap.style.display = "flex";
   } else {
     img.src = "";

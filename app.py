@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, request, send_from_directory, Response
 import os
 import sys
 import subprocess
@@ -19,7 +19,7 @@ from database import (
     list_quotation_refs, get_quotation_data, approve_quotation,
     save_challan_upload
 )
-from google_drive import upload_challan_to_drive, upload_letterhead_pad_image
+from google_drive import upload_challan_to_drive, upload_letterhead_pad_image, download_file_from_drive
 
 
 def get_base_dir():
@@ -40,7 +40,10 @@ init_db()
 # "Authorization: Bearer <token>" — enforced centrally so a route added
 # later is locked down by default instead of relying on remembering to
 # opt each one in individually.
-PUBLIC_PATHS = {'/', '/api/config', '/api/login'}
+# pad_image_proxy is public because it's loaded as a plain CSS
+# background-image URL (no way to attach an Authorization header to that),
+# and the content itself — a company letterhead image — isn't sensitive.
+PUBLIC_PATHS = {'/', '/api/config', '/api/login', '/api/letterhead/pad_image_proxy'}
 
 
 @app.before_request
@@ -470,8 +473,31 @@ def api_upload_letterhead_pad_image():
         file_bytes = file.read()
         ext = os.path.splitext(file.filename)[1] or '.jpg'
         uploaded = upload_letterhead_pad_image(file_bytes, f"letterhead_pad{ext}", file.mimetype or 'image/jpeg')
-        updated = save_letterhead_settings({'pad_image': uploaded['view_url']})
-        return jsonify({"status": "success", "pad_image": uploaded['view_url'], "letterhead": updated})
+        # Store the bare Drive file_id, not a direct Drive URL — Google sends
+        # Cross-Origin-Resource-Policy: same-site on that URL, which blocks
+        # browsers from loading it as a background-image on our own domain.
+        # The frontend instead points at our own pad_image_proxy below.
+        updated = save_letterhead_settings({'pad_image': uploaded['file_id']})
+        return jsonify({"status": "success", "pad_image": uploaded['file_id'], "letterhead": updated})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+
+
+@app.route('/api/letterhead/pad_image_proxy', methods=['GET'])
+def api_letterhead_pad_image_proxy():
+    """Streams the pad image through our own origin instead of the browser
+    loading it directly from Drive — sidesteps Drive's
+    Cross-Origin-Resource-Policy: same-site header, which otherwise blocks
+    the image from loading as a background-image on any other site."""
+    lh = get_letterhead_settings()
+    file_id = lh.get('pad_image')
+    if not file_id:
+        return jsonify({"status": "error", "message": "No pad image configured"}), 404
+    try:
+        file_bytes, mime_type = download_file_from_drive(file_id)
+        return Response(file_bytes, mimetype=mime_type, headers={
+            'Cache-Control': 'public, max-age=3600'
+        })
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 400
 

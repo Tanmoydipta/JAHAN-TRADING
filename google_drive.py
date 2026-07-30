@@ -114,8 +114,34 @@ def upload_challan_to_drive(file_bytes, filename, mime_type):
 
 
 def upload_letterhead_pad_image(file_bytes, filename, mime_type):
-    """Uploads the business pad header image so it can be embedded as a
-    background-image in the invoice/quotation pads for any logged-in user.
-    Returns {"file_id": ..., "view_url": ...} — view_url is a direct-content
-    link (drive.google.com/uc?export=view), not the Drive viewer page."""
+    """Uploads the business pad header image. Returns {"file_id": ..., "view_url": ...}.
+
+    Also grants "anyone with the link, viewer" so the file can be opened
+    directly in a browser tab if needed — but the app itself does NOT embed
+    this URL directly as an <img>/background-image: Google sends
+    `Cross-Origin-Resource-Policy: same-site` on the direct-content URL,
+    which browsers enforce to block exactly that kind of cross-site
+    embedding (confirmed by testing — the URL opens fine as a full page
+    navigation but fails to load as an <img> src). Instead, the app stores
+    just the file_id and streams the image through its own
+    /api/letterhead/pad_image_proxy endpoint (see download_file_from_drive()
+    below and app.py), which sidesteps the header entirely since the browser
+    then only ever talks to our own origin for this image.
+    """
     return upload_file_to_drive(file_bytes, filename, mime_type, make_public=True)
+
+
+def download_file_from_drive(file_id):
+    """Fetches a file's bytes + mime type server-side (no CORP/CORS
+    restriction applies to server-to-server requests) for
+    /api/letterhead/pad_image_proxy to stream back through our own origin."""
+    service, _ = _get_drive_service()
+    meta = service.files().get(fileId=file_id, fields='mimeType').execute()
+    request = service.files().get_media(fileId=file_id)
+    buf = io.BytesIO()
+    from googleapiclient.http import MediaIoBaseDownload
+    downloader = MediaIoBaseDownload(buf, request)
+    done = False
+    while not done:
+        _, done = downloader.next_chunk()
+    return buf.getvalue(), meta.get('mimeType', 'image/jpeg')
