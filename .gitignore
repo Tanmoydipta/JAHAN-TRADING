@@ -30,6 +30,10 @@ android-app/.artifacts/
 # Live secrets — see config.json.example instead. This file holds the real
 # Aiven DB host/user/password; it must never enter git history.
 config.json
+# Any local variant of it (e.g. one-off files prepared for pasting into
+# Render's Secret File editor) carries the same live password — ignore by
+# prefix so a typo'd filename doesn't slip past the exact-match rule above.
+config_*.json
 
 # Google Drive OAuth credentials — both are secrets, never commit them.
 # service_account.json is the old (non-working, service-account) approach's
