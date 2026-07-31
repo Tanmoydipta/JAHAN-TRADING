@@ -15,11 +15,11 @@ Flask + vanilla JS ERP system for a trading/inventory business. Config-driven sc
 - `users` — id, username (unique), password_hash (sha256), full_name, role, client_id, is_active
 - `products` — id, client_id, product_type, size, unit_price, **origin** (nullable, auto-migrated)
 - `inventory` — id, client_id, product_type, size, quantity, cost_price
-- `customers` — id, client_id, customer_name, customer_type, contact_number
-- `transporters` — id, client_id, entry_date, transporter_name, truck_no, movement_type, reference_no, quantity, **from_location**, **to_location**, rent, advance, due
-- `purchases` — id, client_id, input_invoice_no, purchase_date, supplier_name, mobile_number, product_type, size, unit_price, quantity, total, transporter_name, truck_no, loading_location, **unloading_location**, advance, due, **record_source** (`'New'`/`'Previous'`, default `'New'`)
-- `sales` — id, client_id, chalan_no, sale_date, buyer_name, contact_number, product_type, size, received_quantity, cost_price, sale_unit_price, sale_total_price, po_order, transporter_name, truck_no, **loading_location**, unloading_location, advance, due, **record_source** (`'New'`/`'Previous'`, default `'New'`)
-- `quotations` — id, client_id, quotation_no, quotation_date, customer_name, product_type, size, origin, unit_price, quantity, total, status (`pending`/`approved`), created_by, authorized_by, authorized_at
+- `customers` — id, client_id, customer_name, customer_type, contact_number, **address**
+- `transporters` — id, client_id, entry_date, transporter_name, truck_no, movement_type, reference_no, quantity, **from_location**, **to_location**, rent, advance, due, **address**
+- `purchases` — id, client_id, input_invoice_no, purchase_date, supplier_name, mobile_number, product_type, size, unit_price, quantity, total, transporter_name, truck_no, loading_location, **unloading_location**, advance, due, **record_source** (`'New'`/`'Previous'`, default `'New'`), **address**
+- `sales` — id, client_id, chalan_no, sale_date, buyer_name, contact_number, product_type, size, received_quantity, cost_price, sale_unit_price, sale_total_price, po_order, transporter_name, truck_no, **loading_location**, unloading_location, advance, due, **record_source** (`'New'`/`'Previous'`, default `'New'`), **address**
+- `quotations` — id, client_id, quotation_no, quotation_date, customer_name, product_type, size, origin, unit_price, quantity, total, status (`pending`/`approved`), created_by, authorized_by, authorized_at, **address**
 - `challan_uploads` — id, client_id, chalan_no, file_name, drive_file_id, drive_view_url, uploaded_by, uploaded_at (one row per chalan_no — see Google Drive section)
 
 Seed data (`seed_admin_and_demo()`): admin user (`admin`/`admin123`, role=`admin`, client_id=`CLI-001`), 5 demo products (Steel Rod 12mm/16mm, Hydraulic Valve, Brass Fitting, Bearing Set).
@@ -119,6 +119,16 @@ Invoice rendering (`get_invoice_data()` / `openInvoiceModal()`):
 ### Transporter entry auto-fill
 
 The `new_transporter` form has two **readonly** fields: `from_location` and `to_location`. When the user picks an invoice reference (`invoice_ref_select`), `app.js` reads `from_location`/`to_location` from the `<option>` element's `dataset` (populated by `/api/invoice_refs`) and fills those fields automatically.
+
+### Customer address auto-fill
+
+`customers` gained an `address` field (Customer Registration). Every `customer_select` field that references a customer (`buyer_name` in `new_sale`, `supplier_name` in `new_purchase`, `transporter_name` in `new_transporter`, `customer_name` in `new_quotation`) can declare `fills_address_field: "<field_name>"` in its config — mirroring the existing `fills_contact_field` mechanism. `renderEntryForm()` in `app.js` sets `option.dataset.address` when building the dropdown and fills the target field's value on change; both `fills_contact_field` and `fills_address_field` now share one `onchange` handler instead of two separate ones.
+
+Like `contact_number`, the address is **denormalized onto the transaction row itself** (`sales.address`, `purchases.address`, `transporters.address`, `quotations.address`) at save time rather than joined from `customers` at read time — this keeps historical documents (invoices, old reports) showing the address as it was when the transaction happened, not the customer's current address if it's since changed. Linking a quotation into a Sales Entry (`applyQuotationToSale()`) carries the quotation's own stored `address` across (falling back to the matched customer option's current address if the quotation has none).
+
+In **Previous** (historical backfill) mode, `forceEditable` was broadened from "just `chalan_no`" to **any** readonly field — since there's no live customer/inventory link in that mode to auto-populate `contact_number`/`mobile_number`/`address`/`cost_price` from, they all need to become plain editable inputs, not just the reference number.
+
+Address was added to: Customer Directory, Sales Report, Purchase Report, Transporter Ledger, and Quotation Report (report columns), plus the invoice and quotation print pads (`padCustAddress`/`qpCustAddress`). It was **not** added to `customer_dues_report`/`customer_transactions_report` — those are aggregate UNION queries grouped by `customer_name` across three different tables, and joining address back in there would need fuzzy matching against free-text names (especially in Previous mode) for little practical benefit over just checking Customer Directory or the per-transaction reports directly.
 
 ### Product & Customer editing
 

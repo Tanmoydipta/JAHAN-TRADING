@@ -577,6 +577,7 @@ async function renderEntryForm(entryId) {
         const o = document.createElement("option");
         o.value = c.customer_name;
         o.dataset.contact = c.contact_number || "";
+        o.dataset.address = c.address || "";
         o.innerText = c.contact_number ? `${c.customer_name} (${c.contact_number})` : c.customer_name;
         input.appendChild(o);
       });
@@ -586,11 +587,17 @@ async function renderEntryForm(entryId) {
         o.innerText = `No ${f.customer_type_filter} customers yet — add one in Customer Registration first`;
         input.appendChild(o);
       }
-      if (f.fills_contact_field) {
+      if (f.fills_contact_field || f.fills_address_field) {
         input.onchange = () => {
           const opt = input.options[input.selectedIndex];
-          const contactEl = document.getElementById(`input_${f.fills_contact_field}`);
-          if (contactEl) contactEl.value = opt.dataset.contact || "";
+          if (f.fills_contact_field) {
+            const contactEl = document.getElementById(`input_${f.fills_contact_field}`);
+            if (contactEl) contactEl.value = opt.dataset.contact || "";
+          }
+          if (f.fills_address_field) {
+            const addressEl = document.getElementById(`input_${f.fills_address_field}`);
+            if (addressEl) addressEl.value = opt.dataset.address || "";
+          }
         };
       }
     } else if (effType === "invoice_ref_select") {
@@ -633,9 +640,11 @@ async function renderEntryForm(entryId) {
       input.className = "form-control";
       if (effType === "number") input.step = "any";
       if (f.required) input.required = true;
-      // Previous (historical backfill) mode always allows editing the
-      // reference number manually — there is no live auto-gen to protect.
-      const forceEditable = currentRecordMode === "Previous" && f.name === "chalan_no";
+      // Previous (historical backfill) mode always allows editing every
+      // normally-readonly field manually — there's no live customer/
+      // inventory link left to auto-populate them from (chalan_no's
+      // auto-gen, contact/address auto-fill, cost_price from inventory).
+      const forceEditable = currentRecordMode === "Previous";
       if (f.readonly && !forceEditable) input.readOnly = true;
       if (f.auto_gen && currentRecordMode !== "Previous") input.value = `${f.auto_gen}${Date.now().toString().slice(-6)}`;
       if (effType === "date") input.value = new Date().toISOString().split('T')[0];
@@ -1095,6 +1104,8 @@ async function applyQuotationToSale(quotationNo) {
       buyerSel.selectedIndex = Array.from(buyerSel.options).indexOf(matched);
       const contactEl = document.getElementById("input_contact_number");
       if (contactEl) contactEl.value = matched.dataset.contact || "";
+      const addressEl = document.getElementById("input_address");
+      if (addressEl) addressEl.value = data.address || matched.dataset.address || "";
     }
 
     const items = data.items || [];
@@ -1911,6 +1922,7 @@ async function openInvoiceModal(invoiceRef) {
     });
 
     document.getElementById("padCustName").innerText = sale.buyer_name || "-";
+    document.getElementById("padCustAddress").innerText = sale.address || "";
     document.getElementById("padCustPhone").innerText = sale.contact_number ? `Phone: ${sale.contact_number}` : "";
     document.getElementById("padCustLocation").innerText = sale.unloading_location ? `Delivery: ${sale.unloading_location}` : "";
     document.getElementById("padInvNo").innerText = sale.chalan_no || "-";
@@ -1986,6 +1998,7 @@ async function openQuotationModal(quotationNo) {
     });
 
     document.getElementById("qpCustName").innerText = data.customer_name || "-";
+    document.getElementById("qpCustAddress").innerText = data.address || "";
     document.getElementById("qpInvNo").innerText = data.quotation_no || "-";
     document.getElementById("qpInvDate").innerText = data.quotation_date || "-";
 

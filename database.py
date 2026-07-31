@@ -590,13 +590,13 @@ def list_customers(client_id, customer_type=None):
     ph = _ph(mode)
     if customer_type:
         cursor.execute(
-            f"SELECT id, customer_name, customer_type, contact_number FROM customers "
+            f"SELECT id, customer_name, customer_type, contact_number, address FROM customers "
             f"WHERE client_id = {ph} AND customer_type = {ph} ORDER BY customer_name ASC",
             (client_id, customer_type)
         )
     else:
         cursor.execute(
-            f"SELECT id, customer_name, customer_type, contact_number FROM customers "
+            f"SELECT id, customer_name, customer_type, contact_number, address FROM customers "
             f"WHERE client_id = {ph} ORDER BY customer_name ASC",
             (client_id,)
         )
@@ -1109,6 +1109,7 @@ def get_quotation_data(quotation_no, client_id=None):
         "customer_name": header.get('customer_name'),
         "quotation_date": header.get('quotation_date'),
         "status": header.get('status'),
+        "address": header.get('address'),
         "items": items,
         "grand_total": grand_total,
         "letterhead": get_letterhead_settings(),
