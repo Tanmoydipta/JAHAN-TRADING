@@ -722,6 +722,32 @@ input[readonly] { background: rgba(255,255,255,0.02) !important; color: var(--te
   padding-top: 6px;
 }
 
+/* Quotation offer-letter body — flows normally (not pinned to fixed spots
+   like the invoice's pre-printed-pad signature boxes) since this is
+   correspondence text, not a transactional form overlaid on a physical pad. */
+.pad-letter-topline { display: flex; justify-content: space-between; font-size: 12px; color: #334155; margin-bottom: 10px; }
+.pad-letter-to { font-size: 12px; color: #334155; margin-bottom: 10px; }
+.pad-letter-to .cust-name { font-size: 13px; margin-top: 1px; }
+.pad-letter-sub { font-size: 12px; color: #1e293b; margin-bottom: 8px; }
+.pad-letter-salutation { font-size: 12px; color: #1e293b; margin-bottom: 6px; }
+.pad-letter-intro { font-size: 12px; color: #1e293b; margin-bottom: 12px; }
+.pad-letter-terms-row { display: flex; justify-content: space-between; gap: 20px; margin-bottom: 14px; font-size: 12px; color: #334155; }
+.pad-letter-terms-row > div { flex: 1; }
+.pad-letter-payment { font-size: 12px; color: #1e293b; margin-bottom: 14px; }
+.pad-letter-payment .meta-title { display: block; margin-bottom: 4px; }
+.pad-letter-bank { white-space: pre-line; font-size: 11px; color: #475569; margin-top: 4px; }
+.pad-letter-signoff { display: flex; justify-content: space-between; font-size: 12px; color: #1e293b; margin-top: 10px; }
+.sig-underline { display: inline-block; min-width: 140px; border-bottom: 1px solid #94a3b8; }
+
+/* The quotation pad grows to fit its letter content (see forceTextHeader in
+   applyPadBackground()) rather than being a fixed-height box, so its footer
+   note flows normally after the signoff line instead of being pinned to a
+   fixed offset from the bottom like the invoice pad's .pad-footer is. */
+#qpFooterNote {
+  position: static;
+  margin-top: 16px;
+}
+
 /* RESPONSIVE / MOBILE LAYOUT */
 @media (max-width: 860px) {
   .sidebar {

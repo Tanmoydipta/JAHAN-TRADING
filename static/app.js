@@ -2094,7 +2094,7 @@ async function openQuotationModal(quotationNo) {
 
     applyPadBackground(padPaper, headerArea, padDivider, lh, {
       companyTitleId: "qpCompanyTitle", subHeadingId: "qpSubHeading", contactLineId: "qpContactLine"
-    });
+    }, { forceTextHeader: true });
 
     document.getElementById("qpCustName").innerText = data.customer_name || "-";
     document.getElementById("qpCustAddress").innerText = data.address || "";
@@ -2121,10 +2121,170 @@ async function openQuotationModal(quotationNo) {
     document.getElementById("qpGrandTotal").innerText = `BDT ${(data.grand_total || 0).toFixed(2)}`;
     document.getElementById("qpFooterNote").innerText = lh.footer_note || "Thank you for your business!";
 
+    // Offer-letter framing (Sub/intro line) built from the actual line
+    // items rather than hardcoded, so it reads correctly for both a single-
+    // product quote and a multi-product one.
+    const itemsSummary = summarizeQuotationItems(items);
+    document.getElementById("qpSubLine").innerText =
+      `Offer Letter to Supply ${itemsSummary} for ${data.customer_name || 'your'} Project.`;
+    document.getElementById("qpIntroPara").innerText =
+      `We are pleased to offer you the rate quotation for supply of ${itemsSummary} for your ` +
+      `${data.customer_name || ''} requirement. The rate, terms and conditions, and mode of payment are given below.`;
+
+    document.getElementById("qpTransportTerms").innerText = data.transport_terms || "With Transport";
+    document.getElementById("qpWeighingTerms").innerText = data.weighing_terms || "Unload Point Scale Qty";
+    document.getElementById("qpPaymentTerms").innerText = data.payment_terms || "After Delivery 15 Days Full Payment";
+    document.getElementById("qpBankDetails").innerText = lh.bank_details || "";
+    document.getElementById("qpSignOffDate").innerText = data.quotation_date || "";
+
     document.getElementById("quotationModal").classList.add("active");
   } catch (err) {
     alert("Failed to load quotation: " + err.message);
   }
+}
+
+// Builds a short human-readable phrase like
+// "5/10 MM PAKUR BLACK STONE (Origin: India)" (single item) or
+// "Steel Rod 12mm (Origin: China) and Hydraulic Valve 3in" (multiple) —
+// used for the letter's Sub: line and intro paragraph.
+function summarizeQuotationItems(items) {
+  if (!items || items.length === 0) return "the below-listed product(s)";
+  const parts = items.map(item => {
+    const size = item.size ? ` ${item.size}` : '';
+    const origin = item.origin ? ` (Origin: ${item.origin})` : '';
+    return `${item.product_type || 'Product'}${size}${origin}`;
+  });
+  if (parts.length === 1) return parts[0];
+  if (parts.length === 2) return `${parts[0]} and ${parts[1]}`;
+  return `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`;
+}
+
+// The quotation pad grows to fit its (variable-length) letter content
+// instead of being locked to the invoice's fixed 612x792 physical pad size
+// (see applyPadBackground's forceTextHeader), so its PDF export can't reuse
+// saveElementAsPDF()'s single-fixed-page approach either — a longer quote
+// would get silently clipped to one pad-height. This instead captures the
+// element at its natural height and paginates across as many US Letter
+// pages as needed, the same slice-and-addPage recipe saveReportAsPDF() uses.
+async function saveQuotationAsPDF() {
+  const el = document.getElementById('quotationPadPaper');
+  if (!el) return;
+  const container = el.closest('.invoice-modal-container');
+  const prevContainerMaxHeight = container ? container.style.maxHeight : null;
+  const prevContainerOverflow = container ? container.style.overflow : null;
+  const prevElOverflow = el.style.overflow;
+  if (container) { container.style.maxHeight = "none"; container.style.overflow = "visible"; }
+  el.style.overflow = "visible";
+
+  try {
+    const canvas = await html2canvas(el, { scale: 2, backgroundColor: '#ffffff', useCORS: true });
+    const { jsPDF } = window.jspdf;
+    const pdf = new jsPDF({ orientation: 'portrait', unit: 'pt', format: [PAD_PAGE_WIDTH_PT, PAD_PAGE_HEIGHT_PT] });
+    const imgWidth = PAD_PAGE_WIDTH_PT;
+    const imgHeight = canvas.height * imgWidth / canvas.width;
+    const imgData = canvas.toDataURL('image/jpeg', 0.95);
+
+    let heightLeft = imgHeight;
+    let position = 0;
+    pdf.addImage(imgData, 'JPEG', 0, position, imgWidth, imgHeight);
+    heightLeft -= PAD_PAGE_HEIGHT_PT;
+    while (heightLeft > 0) {
+      position = heightLeft - imgHeight;
+      pdf.addPage();
+      pdf.addImage(imgData, 'JPEG', 0, position, imgWidth, imgHeight);
+      heightLeft -= PAD_PAGE_HEIGHT_PT;
+    }
+    pdf.save(`Quotation_${(document.getElementById('qpInvNo')?.innerText || 'quote')}.pdf`);
+  } catch (err) {
+    alert("Could not save PDF: " + err.message);
+  } finally {
+    el.style.overflow = prevElOverflow;
+    if (container) { container.style.maxHeight = prevContainerMaxHeight; container.style.overflow = prevContainerOverflow; }
+  }
+}
+
+// Downloads the currently-open quotation as a real .doc file Word can open
+// — no server round-trip and no new pip dependency (no python-docx needed
+// server-side, so nothing to add to the PyInstaller build). This works
+// because Word opens any HTML document saved with a .doc extension/
+// application/msword MIME type; the '﻿' BOM + the Office XML
+// namespaces in <html> are what make Word recognize and render it cleanly
+// rather than showing a "convert on open" prompt.
+function saveQuotationAsDoc() {
+  const get = id => document.getElementById(id)?.innerText || '';
+  const companyName = get('qpCompanyTitle') || (systemConfig?.letterhead?.company_name) || 'JAHAN TRADING CO.';
+  const subHeading = get('qpSubHeading');
+  const contactLine = get('qpContactLine');
+  const quotationNo = get('qpInvNo');
+  const quotationDate = get('qpInvDate');
+  const custName = get('qpCustName');
+  const custAddress = get('qpCustAddress');
+  const subLine = get('qpSubLine');
+  const introPara = get('qpIntroPara');
+  const itemsRowsHtml = document.getElementById('qpItemsBody')?.innerHTML || '';
+  const grandTotal = get('qpGrandTotal');
+  const transportTerms = get('qpTransportTerms');
+  const weighingTerms = get('qpWeighingTerms');
+  const paymentTerms = get('qpPaymentTerms');
+  const bankDetails = get('qpBankDetails').replace(/\n/g, '<br>');
+  const footerNote = get('qpFooterNote');
+  const signOffDate = get('qpSignOffDate');
+
+  const html = `<!DOCTYPE html>
+  <html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'>
+  <head><meta charset="UTF-8"><title>Quotation ${quotationNo}</title>
+  <style>
+    body { font-family: Calibri, Arial, sans-serif; font-size: 12pt; color: #1a1a1a; }
+    h1 { font-size: 16pt; margin-bottom: 0; text-align: center; }
+    .sub-heading, .contact-line { text-align: center; }
+    .sub-heading { font-size: 10pt; color: #444; margin-top: 2px; }
+    .contact-line { font-size: 9pt; color: #666; margin-top: 2px; }
+    table { border-collapse: collapse; width: 100%; margin: 14px 0; }
+    table.data th, table.data td { border: 1px solid #999; padding: 6px 8px; font-size: 10.5pt; }
+    table.data th { background: #f1f1f1; text-align: left; }
+    table.plain, table.plain td { border: none; padding: 0; }
+    .right { text-align: right; }
+    .center { text-align: center; }
+    .section-title { font-weight: bold; margin-top: 14px; }
+  </style></head>
+  <body>
+    <h1>${companyName}</h1>
+    <div class="sub-heading">${subHeading}</div>
+    <div class="contact-line">${contactLine}</div>
+    <hr>
+    <table class="plain"><tr>
+      <td>Ref: <strong>${quotationNo}</strong></td>
+      <td class="right">Date: <strong>${quotationDate}</strong></td>
+    </tr></table>
+    <p>To,<br><strong>${custName}</strong><br>${custAddress}</p>
+    <p><strong>Sub:</strong> ${subLine}</p>
+    <p>Dear Sir,</p>
+    <p>${introPara}</p>
+    <table class="data">
+      <thead><tr><th>SL</th><th>Description</th><th>Size</th><th>Origin</th><th class="center">Qty</th><th class="right">Unit Price</th><th class="right">Amount (BDT)</th></tr></thead>
+      <tbody>${itemsRowsHtml}</tbody>
+    </table>
+    <p class="right"><strong>Total Quotation Price: ${grandTotal}</strong></p>
+    <p><strong>Transportation:</strong> ${transportTerms} &nbsp;&nbsp;&nbsp; <strong>Weighing Term &amp; Condition:</strong> ${weighingTerms}</p>
+    <p class="section-title">Mode Of Payment</p>
+    <p>${paymentTerms}</p>
+    <p>${bankDetails}</p>
+    <br><br>
+    <table class="plain"><tr>
+      <td>Signature: ____________________</td>
+      <td class="right">Date: ${signOffDate}</td>
+    </tr></table>
+    <p style="text-align:center; font-size:9pt; color:#666; margin-top:20px;">${footerNote}</p>
+  </body></html>`;
+
+  const blob = new Blob(['﻿', html], { type: 'application/msword' });
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(blob);
+  link.download = `Quotation_${quotationNo || 'quote'}.doc`;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(link.href);
 }
 
 function closeQuotationModal() {
@@ -2159,13 +2319,20 @@ function padImageSrc(padImage) {
 
 // Shared pad-image/header layout logic used by both the invoice and
 // quotation print pads so alignment stays identical between the two.
-function applyPadBackground(padPaper, headerArea, padDivider, lh, ids) {
+function applyPadBackground(padPaper, headerArea, padDivider, lh, ids, opts) {
+  opts = opts || {};
   // Signature positions (see .sig-authorised/.sig-received in style.css) are
   // pinned relative to the bottom of the pad using this footer height, so
   // they stay clear of the pad's pre-printed address bars in both modes.
   padPaper.style.setProperty("--footer-h", `${lh.footer_height_px || 110}px`);
 
-  if (lh.use_pad_image && lh.pad_image) {
+  // The quotation pad is a multi-paragraph letter, not a compact single-page
+  // form — it's routinely taller than the invoice's fixed physical pad size,
+  // so it always uses the plain text header/auto-growing layout and never
+  // the pre-printed pad-image overlay (which forces the invoice's fixed
+  // 612x792 aspect ratio — that's tuned for the invoice's short content and
+  // clips/overlaps a longer letter).
+  if (lh.use_pad_image && lh.pad_image && !opts.forceTextHeader) {
     padPaper.style.backgroundImage = `url('${padImageSrc(lh.pad_image)}')`;
     padPaper.style.backgroundSize = "100% 100%";
     padPaper.style.backgroundRepeat = "no-repeat";
@@ -2213,6 +2380,7 @@ function populateLetterheadForm() {
   document.getElementById("lhPhone").value = lh.phone || "";
   document.getElementById("lhEmail").value = lh.email || "";
   document.getElementById("lhFooterNote").value = lh.footer_note || "";
+  document.getElementById("lhBankDetails").value = lh.bank_details || "";
   document.getElementById("lhHeaderHeight").value = lh.header_height_px || 140;
   document.getElementById("lhFooterHeight").value = lh.footer_height_px || 110;
   document.getElementById("lhShowBorder").value = lh.show_border !== false ? "true" : "false";
@@ -2290,6 +2458,7 @@ async function saveLetterheadSettings(event) {
     phone: document.getElementById("lhPhone").value,
     email: document.getElementById("lhEmail").value,
     footer_note: document.getElementById("lhFooterNote").value,
+    bank_details: document.getElementById("lhBankDetails").value,
     header_height_px: parseInt(document.getElementById("lhHeaderHeight").value || 140),
     footer_height_px: parseInt(document.getElementById("lhFooterHeight").value || 110),
     show_border: document.getElementById("lhShowBorder").value === "true",

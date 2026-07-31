@@ -226,7 +226,8 @@ def _ensure_letterhead_table(cursor, mode):
                 footer_height_px INTEGER,
                 show_border INTEGER,
                 use_pad_image INTEGER,
-                pad_image TEXT
+                pad_image TEXT,
+                bank_details TEXT
             )
         """)
     else:
@@ -243,7 +244,8 @@ def _ensure_letterhead_table(cursor, mode):
                 footer_height_px INT,
                 show_border TINYINT,
                 use_pad_image TINYINT,
-                pad_image MEDIUMTEXT
+                pad_image MEDIUMTEXT,
+                bank_details TEXT
             )
         """)
 
@@ -260,6 +262,19 @@ def _ensure_letterhead_table(cursor, mode):
     if 'footer_height_px' not in existing_cols:
         col_type = 'INTEGER' if mode == 'sqlite' else 'INT'
         cursor.execute(f"ALTER TABLE letterhead_settings ADD COLUMN footer_height_px {col_type}")
+    if 'bank_details' not in existing_cols:
+        col_type = 'TEXT' if mode == 'sqlite' else 'MEDIUMTEXT'
+        cursor.execute(f"ALTER TABLE letterhead_settings ADD COLUMN bank_details {col_type}")
+
+    # Payment terms/bank info printed on quotation offer letters — seeded
+    # with the business's real accounts (from the client's own reference
+    # offer letter) so a fresh install doesn't ship blank bank details.
+    DEFAULT_BANK_DETAILS = (
+        "Payment will be made in favor of M/S JAHAN TRADING.\n"
+        "BRAC BANK, AGRABAD, CHITTAGONG — A/C: 2077772850001, Routing: 215152349\n"
+        "EASTERN BANK, MIRPUR BRANCH — A/C: 1071070005188, Routing: 095262987\n"
+        "TRUST BANK PLC, HALISHAHAR, CHITTAGONG — A/C: 00240210009446, Routing: 240153162"
+    )
 
     ph = _ph(mode)
     cursor.execute("SELECT COUNT(*) as cnt FROM letterhead_settings WHERE id = 1")
@@ -271,8 +286,8 @@ def _ensure_letterhead_table(cursor, mode):
         old_lh = load_config().get('letterhead', {}) or {}
         cursor.execute(
             f"INSERT INTO letterhead_settings (id, company_name, sub_heading, address, phone, "
-            f"email, footer_note, header_height_px, footer_height_px, show_border, use_pad_image, pad_image) "
-            f"VALUES ({ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph})",
+            f"email, footer_note, header_height_px, footer_height_px, show_border, use_pad_image, pad_image, bank_details) "
+            f"VALUES ({ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph})",
             (
                 1,
                 old_lh.get('company_name', ''),
@@ -285,8 +300,16 @@ def _ensure_letterhead_table(cursor, mode):
                 int(old_lh.get('footer_height_px') or 110),
                 1 if old_lh.get('show_border', True) else 0,
                 0,
-                ''
+                '',
+                DEFAULT_BANK_DETAILS
             )
+        )
+    elif 'bank_details' not in existing_cols:
+        # Existing install upgrading — same seed, but as an UPDATE since the
+        # row already exists (only fills it if it was empty/null).
+        cursor.execute(
+            f"UPDATE letterhead_settings SET bank_details = {ph} WHERE id = 1 AND (bank_details IS NULL OR bank_details = '')",
+            (DEFAULT_BANK_DETAILS,)
         )
 
 
@@ -328,6 +351,7 @@ def save_letterhead_settings(payload):
         'show_border': payload.get('show_border', existing.get('show_border', True)),
         'use_pad_image': payload.get('use_pad_image', existing.get('use_pad_image', False)),
         'pad_image': pad_image if 'pad_image' in payload else existing.get('pad_image', ''),
+        'bank_details': payload.get('bank_details', existing.get('bank_details', '')),
     }
 
     conn, mode = get_db_connection()
@@ -339,12 +363,12 @@ def save_letterhead_settings(payload):
         merged['header_height_px'], merged['footer_height_px'],
         1 if merged['show_border'] else 0,
         1 if merged['use_pad_image'] else 0,
-        merged['pad_image'],
+        merged['pad_image'], merged['bank_details'],
     )
     cursor.execute(
         f"UPDATE letterhead_settings SET company_name={ph}, sub_heading={ph}, address={ph}, "
         f"phone={ph}, email={ph}, footer_note={ph}, header_height_px={ph}, footer_height_px={ph}, "
-        f"show_border={ph}, use_pad_image={ph}, pad_image={ph} WHERE id = 1",
+        f"show_border={ph}, use_pad_image={ph}, pad_image={ph}, bank_details={ph} WHERE id = 1",
         values
     )
     if mode == 'sqlite':
@@ -1110,6 +1134,9 @@ def get_quotation_data(quotation_no, client_id=None):
         "quotation_date": header.get('quotation_date'),
         "status": header.get('status'),
         "address": header.get('address'),
+        "transport_terms": header.get('transport_terms'),
+        "weighing_terms": header.get('weighing_terms'),
+        "payment_terms": header.get('payment_terms'),
         "items": items,
         "grand_total": grand_total,
         "letterhead": get_letterhead_settings(),

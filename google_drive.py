@@ -15,6 +15,7 @@ the saved refresh token). See GOOGLE_DRIVE_SETUP.md for the full walkthrough.
 """
 import io
 import os
+import tempfile
 
 from database import load_config
 
@@ -27,6 +28,16 @@ def _resolve_path(path):
     if os.path.isabs(path):
         return path
     return os.path.join(os.path.dirname(__file__), path)
+
+
+def _writable_token_cache_path():
+    """Fallback location for a refreshed token when oauth_token_path isn't
+    writable — e.g. on Render, config.json's google_drive.oauth_token_path
+    points at /etc/secrets/drive_token.json, which is a read-only Secret
+    File mount. Without this, every refresh crashes with
+    `[Errno 30] Read-only file system`, which breaks both challan uploads
+    and the pad_image_proxy (since both go through _get_drive_service())."""
+    return os.path.join(tempfile.gettempdir(), 'jahan_drive_token_cache.json')
 
 
 def _get_drive_service():
@@ -51,18 +62,31 @@ def _get_drive_service():
         )
 
     token_path = _resolve_path(drive_cfg.get('oauth_token_path', 'drive_token.json'))
-    if not os.path.exists(token_path):
+    fallback_path = _writable_token_cache_path()
+    # A previously-refreshed token cached in the fallback location is newer
+    # than whatever's at token_path (which may be a stale, unwritable Secret
+    # File), so prefer it if present.
+    load_path = fallback_path if os.path.exists(fallback_path) else token_path
+    if not os.path.exists(load_path):
         raise ValueError(
             "Google Drive isn't authorized yet — run 'python authorize_google_drive.py' once "
             "from the project folder to complete the one-time Google sign-in. See GOOGLE_DRIVE_SETUP.md."
         )
 
-    creds = Credentials.from_authorized_user_file(token_path, SCOPES)
+    creds = Credentials.from_authorized_user_file(load_path, SCOPES)
     if not creds.valid:
         if creds.expired and creds.refresh_token:
             creds.refresh(Request())
-            with open(token_path, 'w', encoding='utf-8') as f:
-                f.write(creds.to_json())
+            try:
+                with open(token_path, 'w', encoding='utf-8') as f:
+                    f.write(creds.to_json())
+            except OSError:
+                # token_path isn't writable (e.g. Render's /etc/secrets
+                # mount) — cache the refreshed token in a writable spot
+                # instead so later requests in this process reuse it rather
+                # than re-refreshing (and failing to persist) every time.
+                with open(fallback_path, 'w', encoding='utf-8') as f:
+                    f.write(creds.to_json())
         else:
             raise ValueError(
                 "Google Drive authorization has expired or was revoked — run "
