@@ -657,28 +657,33 @@ input[readonly] { background: rgba(255,255,255,0.02) !important; color: var(--te
   print-color-adjust: exact;
 }
 
+/* Spacing throughout this pad is deliberately tight — the page is now a
+   fixed physical size (US Letter, see PAD_PAGE_WIDTH_PT/HEIGHT_PT in app.js)
+   rather than growing to fit content, and header/footer padding already
+   claims a large chunk of it. Generous margins here previously pushed the
+   totals box down far enough to collide with the signature row below. */
 .pad-header { text-align: center; }
 .pad-company-title { font-size: 24px; font-weight: 800; color: #0f172a; letter-spacing: 1px; }
 .pad-sub-heading { font-size: 12px; color: #475569; font-weight: 600; text-transform: uppercase; margin-top: 2px; }
 .pad-contact-line { font-size: 11px; color: #64748b; margin-top: 4px; }
-.pad-divider { height: 2px; background: #0f172a; margin: 16px 0 20px 0; }
+.pad-divider { height: 2px; background: #0f172a; margin: 10px 0 12px 0; }
 
-.pad-meta-row { display: flex; justify-content: space-between; margin-bottom: 24px; }
+.pad-meta-row { display: flex; justify-content: space-between; margin-bottom: 14px; }
 .meta-title { font-size: 10px; font-weight: 700; color: #64748b; letter-spacing: 1px; }
 .cust-name { font-size: 16px; font-weight: 700; color: #0f172a; margin-top: 2px; }
 .cust-detail { font-size: 12px; color: #334155; }
 .inv-title { font-size: 16px; font-weight: 800; color: #4338ca; text-align: right; margin-bottom: 4px; }
 .inv-meta-line { font-size: 12px; color: #334155; text-align: right; }
 
-.pad-table { width: 100%; border-collapse: collapse; margin-bottom: 24px; }
-.pad-table th { background: #f1f5f9; color: #0f172a; font-size: 11px; text-transform: uppercase; font-weight: 700; padding: 10px; border-bottom: 2px solid #cbd5e1; }
-.pad-table td { padding: 10px; font-size: 12px; border-bottom: 1px solid #e2e8f0; color: #1e293b; }
+.pad-table { width: 100%; border-collapse: collapse; margin-bottom: 14px; }
+.pad-table th { background: #f1f5f9; color: #0f172a; font-size: 11px; text-transform: uppercase; font-weight: 700; padding: 7px 8px; border-bottom: 2px solid #cbd5e1; }
+.pad-table td { padding: 7px 8px; font-size: 12px; border-bottom: 1px solid #e2e8f0; color: #1e293b; }
 
-.pad-totals-row { display: flex; justify-content: space-between; margin-bottom: 40px; }
+.pad-totals-row { display: flex; justify-content: space-between; margin-bottom: 14px; }
 .pad-notes-box { width: 55%; font-size: 11px; color: #475569; }
 .pad-totals-box { width: 40%; font-size: 13px; }
-.tot-line { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px dashed #e2e8f0; }
-.tot-line.grand-total { font-size: 15px; font-weight: 800; color: #0f172a; border-bottom: 2px solid #0f172a; margin-top: 6px; padding-top: 6px; }
+.tot-line { display: flex; justify-content: space-between; padding: 3px 0; border-bottom: 1px dashed #e2e8f0; }
+.tot-line.grand-total { font-size: 15px; font-weight: 800; color: #0f172a; border-bottom: 2px solid #0f172a; margin-top: 4px; padding-top: 4px; }
 
 /* Signatures are pinned to fixed spots on the physical pad rather than
    flowing after the totals table — on a pre-printed pad, "Authorised
@@ -687,7 +692,7 @@ input[readonly] { background: rgba(255,255,255,0.02) !important; color: var(--te
    bottom-right corner. --footer-h is set inline (see applyPadBackground())
    from the letterhead's configured footer_height_px, so these track it if
    that setting is adjusted. */
-.pad-signature-row { position: static; margin-top: 50px; }
+.pad-signature-row { position: static; margin-top: 0; }
 .sig-authorised, .sig-received {
   position: absolute;
   width: 200px;
@@ -695,11 +700,27 @@ input[readonly] { background: rgba(255,255,255,0.02) !important; color: var(--te
   font-size: 11px;
   color: #64748b;
 }
-.sig-authorised { left: 60px; bottom: calc(var(--footer-h, 110px) + 70px); }
-.sig-received { right: 40px; bottom: calc(var(--footer-h, 110px) + 10px); text-align: right; }
+.sig-authorised { left: 60px; bottom: calc(var(--footer-h, 110px) + 55px); }
+.sig-received { right: 40px; bottom: calc(var(--footer-h, 110px) + 35px); text-align: right; }
 .sig-line { height: 1px; background: #94a3b8; margin-bottom: 6px; }
 
-.pad-footer { text-align: center; font-size: 10px; color: #64748b; border-top: 1px solid #e2e8f0; padding-top: 10px; margin-top: 30px; }
+/* Absolutely positioned for the same reason the signatures are (see above)
+   — it used to rely on flowing directly after .pad-signature-row, but that
+   row now has zero effective height (its children are position:absolute
+   and don't contribute to flow), so the footer note would otherwise
+   collapse up to sit right after the totals box instead of near the
+   bottom of the page. */
+.pad-footer {
+  position: absolute;
+  left: 50px;
+  right: 50px;
+  bottom: calc(var(--footer-h, 110px) + 8px);
+  text-align: center;
+  font-size: 10px;
+  color: #64748b;
+  border-top: 1px solid #e2e8f0;
+  padding-top: 6px;
+}
 
 /* RESPONSIVE / MOBILE LAYOUT */
 @media (max-width: 860px) {

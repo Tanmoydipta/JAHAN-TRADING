@@ -1855,6 +1855,7 @@ async function saveElementAsPDF(elementId, filenameBase) {
   // restored afterward.
   const container = el.closest('.invoice-modal-container');
   const prevPadOverflow = el.style.overflow;
+  const prevPadHeight = el.style.height;
   const prevContainerMaxHeight = container ? container.style.maxHeight : null;
   const prevContainerOverflow = container ? container.style.overflow : null;
 
@@ -1867,6 +1868,13 @@ async function saveElementAsPDF(elementId, filenameBase) {
   try {
     const captureWidthPx = Math.round(el.clientWidth) || 850;
     const captureHeightPx = Math.round(captureWidthPx * PAD_PAGE_HEIGHT_PT / PAD_PAGE_WIDTH_PT);
+    // The `aspect-ratio` CSS property alone isn't reliably respected inside
+    // html2canvas's internal clone (confirmed by testing — the live DOM
+    // measures correctly, but the captured canvas came out shorter,
+    // crowding the totals box into the signature row below). Pinning an
+    // explicit pixel height removes that ambiguity entirely.
+    el.style.height = `${captureHeightPx}px`;
+    void el.clientWidth; // force a synchronous reflow before capture
 
     const canvas = await html2canvas(el, {
       scale: 2,
@@ -1889,6 +1897,7 @@ async function saveElementAsPDF(elementId, filenameBase) {
     alert("Could not save PDF (the pad background image may not allow this) — try Print instead. " + err.message);
   } finally {
     el.style.overflow = prevPadOverflow;
+    el.style.height = prevPadHeight;
     if (container) {
       container.style.maxHeight = prevContainerMaxHeight;
       container.style.overflow = prevContainerOverflow;
