@@ -439,22 +439,66 @@ const MULTI_ITEM_FIELDS = {
 };
 
 // New/Previous entry mode for Sales & Purchase — "Previous" is a manual
-// historical-backfill mode (see record_source field): every inventory/
-// customer/product lookup becomes a plain text input and nothing touches
-// inventory on save. Reset whenever the user navigates to a different
-// entry tab (switchEntryTab), not on every re-render, since toggling the
-// dropdown itself triggers a re-render and must not stomp on itself.
+// historical-backfill mode (see record_source field): nothing touches
+// inventory on save, and there's no *live* transaction (chalan/quotation)
+// to reference, but customer and product details stay linked to their
+// catalogs — see buildCustomerComboInput()/buildProductComboInput() below.
+// Reset whenever the user navigates to a different entry tab
+// (switchEntryTab), not on every re-render, since toggling the dropdown
+// itself triggers a re-render and must not stomp on itself.
 let currentRecordMode = "New";
 
 function effectiveFieldType(f, entryId) {
   if (currentRecordMode !== "Previous" || (entryId !== "new_sale" && entryId !== "new_purchase")) {
     return f.type;
   }
-  if (["customer_select", "inventory_select", "product_select", "invoice_ref_select", "quotation_ref_select"].includes(f.type)) {
-    const lname = f.name.toLowerCase();
-    return (lname.includes("quantity") || lname.includes("price")) ? "number" : "text";
+  // customer_select stays linked to the customer catalog even in Previous
+  // mode (rendered as an editable combobox, see the customer_select branch
+  // below) — only reference-number lookups tied to a *live* transaction
+  // (an existing chalan/quotation) get downgraded, since there's nothing
+  // live to reference during a historical backfill.
+  if (["invoice_ref_select", "quotation_ref_select"].includes(f.type)) {
+    return "text";
   }
   return f.type;
+}
+
+// Builds an editable combobox: a plain <input> backed by a <datalist> of
+// suggestions, so the user can either pick an existing customer/product
+// (which fires onMatch with its full record) or type a name that isn't in
+// the list at all (onMatch fires with null) — this is what lets Previous
+// mode stay linked to the customer/product catalogs while still allowing
+// fully manual entry for a customer or product no longer/never registered.
+// Returns {input, datalist} — caller must append both to the DOM (the
+// datalist renders nothing itself, but must be present for `list=` to work).
+function makeComboInput(items, getValue, getLabel, onMatch) {
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "form-control";
+  input.autocomplete = "off";
+
+  const datalist = document.createElement("datalist");
+  datalist.id = `combo_${Math.random().toString(36).slice(2)}`;
+  input.setAttribute("list", datalist.id);
+
+  // First occurrence wins on duplicate values (e.g. same product name in
+  // different sizes) — matches the datalist's own first-listed option,
+  // so picking "the first BLACKSTONE(GABRO)" resolves to the same record
+  // whether the user reads it off the suggestion list or the lookup below.
+  const byValue = {};
+  items.forEach(item => {
+    const val = getValue(item);
+    if (!(val in byValue)) byValue[val] = item;
+    const o = document.createElement("option");
+    o.value = val;
+    if (getLabel) o.label = getLabel(item);
+    datalist.appendChild(o);
+  });
+
+  if (onMatch) {
+    input.addEventListener("input", () => onMatch(byValue[input.value] || null));
+  }
+  return { input, datalist };
 }
 
 async function renderEntryForm(entryId) {
@@ -485,6 +529,7 @@ async function renderEntryForm(entryId) {
 
     const effType = effectiveFieldType(f, entryId);
     let input;
+    let pendingDatalist = null;
     if (f.name === "record_source") {
       input = document.createElement("select");
       input.className = "form-control";
@@ -569,36 +614,61 @@ async function renderEntryForm(entryId) {
         calculateSalesTotal();
       };
     } else if (effType === "customer_select") {
-      input = document.createElement("select");
-      input.className = "form-control";
-      input.innerHTML = `<option value="">-- Select ${f.customer_type_filter} Customer --</option>`;
       const custList = await getCustomersByType(f.customer_type_filter);
-      custList.forEach(c => {
-        const o = document.createElement("option");
-        o.value = c.customer_name;
-        o.dataset.contact = c.contact_number || "";
-        o.dataset.address = c.address || "";
-        o.innerText = c.contact_number ? `${c.customer_name} (${c.contact_number})` : c.customer_name;
-        input.appendChild(o);
-      });
-      if (custList.length === 0) {
-        const o = document.createElement("option");
-        o.value = ""; o.disabled = true;
-        o.innerText = `No ${f.customer_type_filter} customers yet — add one in Customer Registration first`;
-        input.appendChild(o);
-      }
-      if (f.fills_contact_field || f.fills_address_field) {
-        input.onchange = () => {
-          const opt = input.options[input.selectedIndex];
-          if (f.fills_contact_field) {
-            const contactEl = document.getElementById(`input_${f.fills_contact_field}`);
-            if (contactEl) contactEl.value = opt.dataset.contact || "";
+
+      if (currentRecordMode === "Previous") {
+        // Previous mode: still linked to the customer catalog (autocompletes
+        // and fills contact/address on an exact match) but not locked to
+        // it — typing a name that isn't in the list is a normal manual entry.
+        const combo = makeComboInput(
+          custList,
+          c => c.customer_name,
+          c => c.contact_number ? `${c.customer_name} (${c.contact_number})` : c.customer_name,
+          (matched) => {
+            if (f.fills_contact_field) {
+              const contactEl = document.getElementById(`input_${f.fills_contact_field}`);
+              if (contactEl) contactEl.value = matched ? (matched.contact_number || "") : contactEl.value;
+            }
+            if (f.fills_address_field) {
+              const addressEl = document.getElementById(`input_${f.fills_address_field}`);
+              if (addressEl) addressEl.value = matched ? (matched.address || "") : addressEl.value;
+            }
           }
-          if (f.fills_address_field) {
-            const addressEl = document.getElementById(`input_${f.fills_address_field}`);
-            if (addressEl) addressEl.value = opt.dataset.address || "";
-          }
-        };
+        );
+        input = combo.input;
+        input.placeholder = `${f.customer_type_filter} customer name — pick existing or type a new one`;
+        pendingDatalist = combo.datalist;
+      } else {
+        input = document.createElement("select");
+        input.className = "form-control";
+        input.innerHTML = `<option value="">-- Select ${f.customer_type_filter} Customer --</option>`;
+        custList.forEach(c => {
+          const o = document.createElement("option");
+          o.value = c.customer_name;
+          o.dataset.contact = c.contact_number || "";
+          o.dataset.address = c.address || "";
+          o.innerText = c.contact_number ? `${c.customer_name} (${c.contact_number})` : c.customer_name;
+          input.appendChild(o);
+        });
+        if (custList.length === 0) {
+          const o = document.createElement("option");
+          o.value = ""; o.disabled = true;
+          o.innerText = `No ${f.customer_type_filter} customers yet — add one in Customer Registration first`;
+          input.appendChild(o);
+        }
+        if (f.fills_contact_field || f.fills_address_field) {
+          input.onchange = () => {
+            const opt = input.options[input.selectedIndex];
+            if (f.fills_contact_field) {
+              const contactEl = document.getElementById(`input_${f.fills_contact_field}`);
+              if (contactEl) contactEl.value = opt.dataset.contact || "";
+            }
+            if (f.fills_address_field) {
+              const addressEl = document.getElementById(`input_${f.fills_address_field}`);
+              if (addressEl) addressEl.value = opt.dataset.address || "";
+            }
+          };
+        }
       }
     } else if (effType === "invoice_ref_select") {
       input = document.createElement("select");
@@ -671,6 +741,7 @@ async function renderEntryForm(entryId) {
     }
 
     group.appendChild(input);
+    if (pendingDatalist) group.appendChild(pendingDatalist);
     container.appendChild(group);
   }
 
@@ -780,11 +851,30 @@ function buildLineItemRow(entryId, idx) {
   const isPrevious = currentRecordMode === "Previous" && (entryId === "new_sale" || entryId === "new_purchase");
 
   if (isPrevious) {
-    // Historical backfill — plain manual inputs only, no inventory/product catalog linkage.
+    // Historical backfill — never touches inventory, but product identity
+    // still links to the product catalog (autocompletes and suggests
+    // size/price on an exact match) with manual entry as a fallback for a
+    // product no longer/never registered there.
+    const priceFieldId = entryId === "new_sale" ? `li_sale_unit_price_${idx}` : `li_unit_price_${idx}`;
     const gProduct = mkGroup(4, `Product #${idx + 1} Type *`);
-    const inProduct = document.createElement("input");
-    inProduct.type = "text"; inProduct.className = "form-control"; inProduct.id = `li_product_type_${idx}`;
-    gProduct.appendChild(inProduct);
+    const productCombo = makeComboInput(
+      productsCache,
+      p => p.product_type,
+      p => `${p.product_type} — ${p.size} (BDT ${parseFloat(p.unit_price).toFixed(2)})`,
+      (matched) => {
+        const sizeEl = document.getElementById(`li_size_${idx}`);
+        const priceEl = document.getElementById(priceFieldId);
+        if (sizeEl) sizeEl.value = matched ? (matched.size || "") : sizeEl.value;
+        if (matched && priceEl && (!priceEl.value || parseFloat(priceEl.value) === 0)) {
+          priceEl.value = matched.unit_price || 0;
+        }
+        recalcLineItemTotals(entryId);
+      }
+    );
+    productCombo.input.id = `li_product_type_${idx}`;
+    productCombo.input.placeholder = "Product name — pick existing or type a new one";
+    gProduct.appendChild(productCombo.input);
+    gProduct.appendChild(productCombo.datalist);
 
     const gSize = mkGroup(2, "Size");
     const inSize = document.createElement("input");
