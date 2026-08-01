@@ -1077,6 +1077,247 @@ def save_multi_item_entry(entry_id, shared_data, line_items, client_id=None, cre
         conn.close()
 
 
+# ---------------- MODIFY EXISTING SALES/PURCHASE ----------------
+# The "Modify" record_source option lets an admin correct a previously
+# entered Sales/Purchase transaction in place (fixing a typo, quantity, or
+# price after the fact) instead of deleting and re-keying it. Distinct from
+# "Previous" (historical backfill of a transaction that never touched
+# inventory) — Modify edits a real transaction and its inventory effect.
+MODIFIABLE_MULTI_TABLES = {
+    'sales': {'ref_col': 'chalan_no', 'name_col': 'buyer_name', 'date_col': 'sale_date'},
+    'purchases': {'ref_col': 'input_invoice_no', 'name_col': 'supplier_name', 'date_col': 'purchase_date'},
+}
+
+
+def list_modifiable_refs(table_name, client_id=None):
+    """Distinct reference numbers (chalan_no/input_invoice_no) available to
+    load into the Modify flow, newest first."""
+    if table_name not in MODIFIABLE_MULTI_TABLES:
+        raise ValueError("table_name must be 'sales' or 'purchases'")
+    spec = MODIFIABLE_MULTI_TABLES[table_name]
+    config = load_config()
+    if not client_id:
+        client_id = config['system'].get('default_client_id', 'CLI-001')
+
+    conn, mode = get_db_connection()
+    cursor = conn.cursor()
+    ph = _ph(mode)
+    cursor.execute(
+        f"SELECT {spec['ref_col']} as reference_no, MAX({spec['name_col']}) as party_name, "
+        f"MAX({spec['date_col']}) as record_date, MAX(id) as sort_id "
+        f"FROM {table_name} WHERE client_id = {ph} GROUP BY {spec['ref_col']} ORDER BY sort_id DESC",
+        (client_id,)
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_editable_record(table_name, reference_no, client_id=None):
+    """Full row set (header + line items) for an existing sales/purchases
+    reference number, used to pre-fill the Modify form."""
+    if table_name not in MODIFIABLE_MULTI_TABLES:
+        raise ValueError("table_name must be 'sales' or 'purchases'")
+    ref_col = MODIFIABLE_MULTI_TABLES[table_name]['ref_col']
+    config = load_config()
+    if not client_id:
+        client_id = config['system'].get('default_client_id', 'CLI-001')
+
+    conn, mode = get_db_connection()
+    cursor = conn.cursor()
+    ph = _ph(mode)
+    cursor.execute(
+        f"SELECT * FROM {table_name} WHERE {ref_col} = {ph} AND client_id = {ph} ORDER BY id ASC",
+        (reference_no, client_id)
+    )
+    rows = cursor.fetchall()
+    items = [dict(r) for r in rows] if mode == 'sqlite' else list(rows)
+    conn.close()
+    if not items:
+        return None
+    return {"table": table_name, "reference_no": reference_no, "header": items[0], "items": items}
+
+
+def update_multi_item_entry(entry_id, original_ref, shared_data, line_items, client_id=None, requested_by=None):
+    """Admin-only: replace every row sharing an existing chalan_no/
+    input_invoice_no with a freshly-computed set from edited data, so a
+    mistake in a previously entered Sales/Purchase transaction can be
+    corrected in place rather than by deleting and re-keying it.
+
+    Implemented as reverse-old-inventory -> delete old rows -> insert new
+    rows, reusing the same reference number throughout — so anything that
+    points at it by that number (transporters.reference_no,
+    challan_uploads.chalan_no) keeps working even though the underlying
+    row ids change.
+    """
+    config = load_config()
+    if not client_id:
+        client_id = config['system'].get('default_client_id', 'CLI-001')
+
+    entry_def = next((ep for ep in config.get('entry_points', []) if ep['id'] == entry_id), None)
+    if not entry_def:
+        raise ValueError(f"Unknown entry point ID: {entry_id}")
+
+    table_name = entry_def['table']
+    if table_name not in MODIFIABLE_MULTI_TABLES:
+        raise ValueError("Modify is only supported for sales and purchases")
+    if not line_items:
+        raise ValueError("At least one product line item is required")
+    if not original_ref:
+        raise ValueError("No existing record selected to modify")
+
+    ref_col = MODIFIABLE_MULTI_TABLES[table_name]['ref_col']
+
+    conn, mode = get_db_connection()
+    cursor = conn.cursor()
+    ph = _ph(mode)
+
+    try:
+        role = _lookup_user_role(cursor, mode, requested_by)
+        if role != 'admin':
+            raise ValueError("Only an admin can modify existing records")
+
+        cursor.execute(
+            f"SELECT * FROM {table_name} WHERE {ref_col} = {ph} AND client_id = {ph} ORDER BY id ASC",
+            (original_ref, client_id)
+        )
+        old_rows = cursor.fetchall()
+        old_rows = [dict(r) for r in old_rows] if mode == 'sqlite' else list(old_rows)
+        if not old_rows:
+            raise ValueError(f"No existing record found for '{original_ref}'")
+
+        old_record_source = str(old_rows[0].get('record_source', '') or '').strip().lower()
+        is_previous = old_record_source == 'previous'
+        old_created_by = old_rows[0].get('created_by')
+
+        # Reverse whatever inventory effect the old rows applied (mirrors
+        # delete_entry) before the new rows apply their own — this stays
+        # correct even if product/size/quantity changed between old and new.
+        if not is_previous:
+            for row in old_rows:
+                if row.get('status') != 'authorized':
+                    continue
+                if table_name == 'purchases':
+                    _inventory_adjust_quantity(
+                        cursor, mode, client_id,
+                        row.get('product_type'), row.get('size'),
+                        -float(row.get('quantity') or 0),
+                    )
+                else:
+                    _inventory_adjust_quantity(
+                        cursor, mode, client_id,
+                        row.get('product_type'), row.get('size'),
+                        float(row.get('received_quantity') or 0),
+                    )
+
+        cursor.execute(
+            f"DELETE FROM {table_name} WHERE {ref_col} = {ph} AND client_id = {ph}",
+            (original_ref, client_id)
+        )
+
+        ref_no = shared_data.get(ref_col) or original_ref
+        now = datetime.now().isoformat(timespec='seconds')
+        advance_total = float(shared_data.get('advance') or 0)
+
+        prepared = []
+        grand_total = 0.0
+        for li in line_items:
+            if table_name == 'sales':
+                qty = float(li.get('received_quantity') or 0)
+                price = float(li.get('sale_unit_price') or 0)
+                line_total = round(qty * price, 2)
+                provided_cost = li.get('cost_price')
+                if provided_cost in (None, "", 0, "0"):
+                    cost = 0.0 if is_previous else _get_inventory_cost(
+                        cursor, mode, client_id, li.get('product_type'), li.get('size'))
+                else:
+                    cost = float(provided_cost)
+                prepared.append({**li, 'received_quantity': qty, 'sale_unit_price': price,
+                                  'sale_total_price': line_total, 'cost_price': cost})
+            else:
+                qty = float(li.get('quantity') or 0)
+                price = float(li.get('unit_price') or 0)
+                line_total = round(qty * price, 2)
+                prepared.append({**li, 'quantity': qty, 'unit_price': price, 'total': line_total})
+            grand_total += line_total
+        grand_total = round(grand_total, 2)
+
+        overall_due = round(max(0.0, grand_total - advance_total), 2)
+        overall_advance_applied = round(grand_total - overall_due, 2)
+
+        table_cols = {c['name'] for c in config['tables'][table_name]['columns']}
+        new_ids = []
+
+        for idx, li in enumerate(prepared):
+            insert_data = {'client_id': client_id}
+            insert_data.update(shared_data)
+            insert_data.update(li)
+            insert_data[ref_col] = ref_no
+
+            insert_data['advance'] = overall_advance_applied if idx == 0 else 0
+            insert_data['due'] = overall_due if idx == 0 else 0
+
+            # created_by preserves the original submitter for the audit
+            # trail; authorized_by/at reflect the admin who just made this
+            # correction, and status/record_source stay as they were —
+            # Modify never flips a record between New and Previous.
+            insert_data['created_by'] = old_created_by
+            insert_data['record_source'] = 'Previous' if is_previous else 'New'
+            insert_data['status'] = 'authorized'
+            insert_data['authorized_by'] = requested_by
+            insert_data['authorized_at'] = now
+
+            for f in entry_def['fields']:
+                if f.get('type') == 'number' and f['name'] not in ('advance', 'due'):
+                    v = insert_data.get(f['name'])
+                    if v is None or v == "":
+                        insert_data[f['name']] = 0
+                    else:
+                        try:
+                            insert_data[f['name']] = float(v)
+                        except (TypeError, ValueError):
+                            insert_data[f['name']] = 0
+
+            insert_data = {k: v for k, v in insert_data.items() if k in table_cols}
+
+            cols = list(insert_data.keys())
+            vals = list(insert_data.values())
+            placeholders = ", ".join([ph] * len(cols))
+            cursor.execute(f"INSERT INTO {table_name} ({', '.join(cols)}) VALUES ({placeholders})", vals)
+            new_ids.append(cursor.lastrowid)
+
+            if is_previous:
+                pass  # historical backfill — never touches inventory or the products catalog
+            elif table_name == 'purchases':
+                _inventory_add_purchase(
+                    cursor, mode, client_id,
+                    insert_data.get('product_type'), insert_data.get('size'),
+                    float(insert_data.get('quantity') or 0), float(insert_data.get('unit_price') or 0),
+                )
+                if insert_data.get('product_type'):
+                    _upsert_product(
+                        cursor, mode, client_id, insert_data['product_type'],
+                        insert_data.get('size') or "", float(insert_data.get('unit_price') or 0),
+                    )
+            else:
+                _inventory_reduce_sale(
+                    cursor, mode, client_id,
+                    insert_data.get('product_type'), insert_data.get('size'),
+                    float(insert_data.get('received_quantity') or 0),
+                )
+
+        if mode == 'sqlite':
+            conn.commit()
+
+        result = {
+            "status": "success", "table": table_name, "ids": new_ids,
+            "line_count": len(new_ids), ref_col: ref_no,
+        }
+        return result
+    finally:
+        conn.close()
+
+
 # ---------------- QUOTATIONS ----------------
 def get_next_quotation_no(client_id):
     config = load_config()

@@ -14,6 +14,7 @@ from database import (
     authorize_entry, list_pending_transactions,
     delete_entry, delete_user, update_user, update_record,
     adjust_entry, list_invoice_refs,
+    list_modifiable_refs, get_editable_record, update_multi_item_entry,
     create_session_token, verify_session_token, revoke_session_token,
     get_letterhead_settings, save_letterhead_settings,
     list_quotation_refs, get_quotation_data, approve_quotation,
@@ -236,6 +237,55 @@ def api_save_multi_entry(entry_id):
         return jsonify(save_multi_item_entry(entry_id, shared, line_items, client_id=client_id, created_by=created_by))
     except ValueError as e:
         return jsonify({"status": "error", "message": str(e)}), 400
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+
+
+@app.route('/api/modify_refs', methods=['GET'])
+def api_modify_refs():
+    client_id = _scoped_client_id(request.args.get('client_id'))
+    if client_id is None:
+        return _forbidden()
+    table_name = request.args.get('table', 'sales')
+    try:
+        return jsonify(list_modifiable_refs(table_name, client_id))
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+
+
+@app.route('/api/entry_record', methods=['GET'])
+def api_entry_record():
+    client_id = _scoped_client_id(request.args.get('client_id'))
+    if client_id is None:
+        return _forbidden()
+    table_name = request.args.get('table', 'sales')
+    reference_no = request.args.get('reference_no')
+    try:
+        res = get_editable_record(table_name, reference_no, client_id=client_id)
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+    if not res:
+        return jsonify({"status": "error", "message": "Record not found"}), 404
+    return jsonify(res)
+
+
+@app.route('/api/entry/<entry_id>/modify', methods=['POST'])
+def api_modify_multi_entry(entry_id):
+    data = request.json or {}
+    client_id = _scoped_client_id(data.get('client_id'))
+    if client_id is None:
+        return _forbidden()
+    requested_by = request.current_user['username']
+    original_ref = data.get('original_ref')
+    shared = data.get('shared', {})
+    line_items = data.get('line_items', [])
+    try:
+        return jsonify(update_multi_item_entry(
+            entry_id, original_ref, shared, line_items,
+            client_id=client_id, requested_by=requested_by
+        ))
+    except ValueError as e:
+        return jsonify({"status": "error", "message": str(e)}), 403
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 400
 

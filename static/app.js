@@ -216,6 +216,7 @@ function switchEntryTab(entryId) {
   currentTab = "entry-form";
   currentEntryId = entryId;
   currentRecordMode = "New";
+  modifyTargetRef = null;
   document.querySelectorAll(".nav-item").forEach(el => el.classList.remove("active"));
   document.querySelector(`.nav-item[data-tab="entry-${entryId}"]`)?.classList.add("active");
   document.querySelectorAll(".tab-view").forEach(el => el.classList.remove("active"));
@@ -448,15 +449,32 @@ const MULTI_ITEM_FIELDS = {
 // itself triggers a re-render and must not stomp on itself.
 let currentRecordMode = "New";
 
+// "Modify" (admin-only) loads an existing Sales/Purchase transaction or
+// Customer record for in-place editing — see buildModifyRefSelectGroup()/
+// loadRecordForModify()/loadCustomerForModify() below. Holds the reference
+// number (chalan_no/input_invoice_no) or customer id currently loaded, so
+// handleFormSubmit() knows which existing record to update; cleared
+// whenever the mode changes or the tab is switched.
+let modifyTargetRef = null;
+
+// Widget choice only — Previous (never touches inventory) and Modify
+// (edits a real transaction's inventory effect server-side) both render
+// manual/catalog-linked fields instead of live stock-locked dropdowns,
+// since neither has a *new* live pick to make from current stock.
+function usesManualWidgets(entryId) {
+  return (currentRecordMode === "Previous" || currentRecordMode === "Modify") &&
+    (entryId === "new_sale" || entryId === "new_purchase");
+}
+
 function effectiveFieldType(f, entryId) {
-  if (currentRecordMode !== "Previous" || (entryId !== "new_sale" && entryId !== "new_purchase")) {
+  if (!usesManualWidgets(entryId)) {
     return f.type;
   }
-  // customer_select stays linked to the customer catalog even in Previous
-  // mode (rendered as an editable combobox, see the customer_select branch
-  // below) — only reference-number lookups tied to a *live* transaction
-  // (an existing chalan/quotation) get downgraded, since there's nothing
-  // live to reference during a historical backfill.
+  // customer_select stays linked to the customer catalog even in Previous/
+  // Modify mode (rendered as an editable combobox, see the customer_select
+  // branch below) — only reference-number lookups tied to a *live*
+  // transaction (an existing chalan/quotation) get downgraded, since
+  // there's nothing live to reference during a historical backfill or edit.
   if (["invoice_ref_select", "quotation_ref_select"].includes(f.type)) {
     return "text";
   }
@@ -530,16 +548,34 @@ async function renderEntryForm(entryId) {
     const effType = effectiveFieldType(f, entryId);
     let input;
     let pendingDatalist = null;
-    if (f.name === "record_source") {
+    if (f.name === "record_source" || f.name === "entry_mode") {
       input = document.createElement("select");
       input.className = "form-control";
+      const isAdmin = currentUser && currentUser.role === "admin";
       f.options.forEach(opt => {
+        // "Modify" edits an existing record in place — admin-only, same as
+        // every other edit/delete action in this app, so non-admins never
+        // even see the option (rather than picking it and hitting a 403).
+        if (opt === "Modify" && !isAdmin) return;
         const o = document.createElement("option");
         o.value = opt; o.innerText = opt;
         input.appendChild(o);
       });
       input.value = currentRecordMode;
-      input.onchange = () => { currentRecordMode = input.value; renderEntryForm(entryId); };
+      input.onchange = () => {
+        currentRecordMode = input.value;
+        modifyTargetRef = null;
+        renderEntryForm(entryId);
+      };
+    } else if ((f.name === "chalan_no" || f.name === "input_invoice_no") && currentRecordMode === "Modify") {
+      // Modify mode: the ref field becomes a picker for an existing record
+      // instead of an auto-generated/readonly value — selecting one loads
+      // the whole transaction (shared fields + line items) for editing.
+      input = document.createElement("select");
+      input.className = "form-control";
+      input.innerHTML = `<option value="">-- Select record to modify --</option>`;
+      populateModifyRefSelect(entryId, input);
+      input.onchange = () => loadRecordForModify(entryId, input.value);
     } else if (effType === "quotation_ref_select") {
       input = document.createElement("select");
       input.className = "form-control";
@@ -616,10 +652,11 @@ async function renderEntryForm(entryId) {
     } else if (effType === "customer_select") {
       const custList = await getCustomersByType(f.customer_type_filter);
 
-      if (currentRecordMode === "Previous") {
-        // Previous mode: still linked to the customer catalog (autocompletes
-        // and fills contact/address on an exact match) but not locked to
-        // it — typing a name that isn't in the list is a normal manual entry.
+      if (usesManualWidgets(entryId)) {
+        // Previous/Modify mode: still linked to the customer catalog
+        // (autocompletes and fills contact/address on an exact match) but
+        // not locked to it — typing a name that isn't in the list is a
+        // normal manual entry.
         const combo = makeComboInput(
           custList,
           c => c.customer_name,
@@ -718,9 +755,9 @@ async function renderEntryForm(entryId) {
       // normally-readonly field manually — there's no live customer/
       // inventory link left to auto-populate them from (chalan_no's
       // auto-gen, contact/address auto-fill, cost_price from inventory).
-      const forceEditable = currentRecordMode === "Previous";
+      const forceEditable = currentRecordMode === "Previous" || currentRecordMode === "Modify";
       if (f.readonly && !forceEditable) input.readOnly = true;
-      if (f.auto_gen && currentRecordMode !== "Previous") input.value = `${f.auto_gen}${Date.now().toString().slice(-6)}`;
+      if (f.auto_gen && currentRecordMode === "New") input.value = `${f.auto_gen}${Date.now().toString().slice(-6)}`;
       if (effType === "date") input.value = new Date().toISOString().split('T')[0];
       if (f.default !== undefined && !input.value) input.value = f.default;
     }
@@ -747,6 +784,10 @@ async function renderEntryForm(entryId) {
     group.appendChild(input);
     if (pendingDatalist) group.appendChild(pendingDatalist);
     container.appendChild(group);
+
+    if (f.name === "entry_mode" && entryId === "new_customer" && currentRecordMode === "Modify") {
+      container.appendChild(await buildCustomerModifySelectGroup());
+    }
   }
 
   // Wire up show_if conditional visibility now that all fields exist
@@ -769,8 +810,9 @@ async function renderEntryForm(entryId) {
     refSelect._populateInvoiceRefs();
   });
 
-  // Auto-fill chalan (skipped in Previous mode — the client keys in their own historical number)
-  if (ep.table === 'sales' && currentRecordMode !== 'Previous') {
+  // Auto-fill chalan (only in New mode — Previous keys in its own historical
+  // number, and Modify's chalan_no field is a picker, not a text input)
+  if (ep.table === 'sales' && currentRecordMode === 'New') {
     try {
       const r = await apiFetch(`/api/next_chalan?client_id=${currentClientId}`);
       const data = await r.json();
@@ -852,13 +894,14 @@ function buildLineItemRow(entryId, idx) {
     return g;
   };
 
-  const isPrevious = currentRecordMode === "Previous" && (entryId === "new_sale" || entryId === "new_purchase");
+  const useManualLine = usesManualWidgets(entryId);
 
-  if (isPrevious) {
-    // Historical backfill — never touches inventory, but product identity
-    // still links to the product catalog (autocompletes and suggests
-    // size/price on an exact match) with manual entry as a fallback for a
-    // product no longer/never registered there.
+  if (useManualLine) {
+    // Previous (historical backfill) or Modify (editing an existing
+    // transaction) — product identity still links to the product catalog
+    // (autocompletes and suggests size/price on an exact match) with
+    // manual entry as a fallback for a product no longer/never registered
+    // there, rather than a live-stock-locked dropdown.
     const priceFieldId = entryId === "new_sale" ? `li_sale_unit_price_${idx}` : `li_unit_price_${idx}`;
     const gProduct = mkGroup(4, `Product #${idx + 1} Type *`);
     const productCombo = makeComboInput(
@@ -1068,6 +1111,117 @@ function buildLineItemRow(entryId, idx) {
   return row;
 }
 
+// ---------------- MODIFY EXISTING RECORD (Sales/Purchase/Customer) ----------------
+// Admin-only: lets a previously entered record be loaded back into its own
+// entry form for in-place editing (the "Modify" record_source/entry_mode
+// option). Distinct from Previous mode — Modify edits a record (and its
+// inventory effect) that already exists, rather than backfilling a new one.
+
+async function populateModifyRefSelect(entryId, selectEl) {
+  const table = entryId === "new_sale" ? "sales" : "purchases";
+  try {
+    const res = await apiFetch(`/api/modify_refs?table=${table}&client_id=${currentClientId}`);
+    const refs = await res.json();
+    refs.forEach(r => {
+      const o = document.createElement("option");
+      o.value = r.reference_no;
+      o.innerText = `${r.reference_no} — ${r.party_name || ''} (${r.record_date || ''})`;
+      selectEl.appendChild(o);
+    });
+  } catch (e) { /* ignore */ }
+}
+
+async function loadRecordForModify(entryId, referenceNo) {
+  modifyTargetRef = null;
+  if (!referenceNo) return;
+  const table = entryId === "new_sale" ? "sales" : "purchases";
+  const refFieldName = entryId === "new_sale" ? "chalan_no" : "input_invoice_no";
+  try {
+    const res = await apiFetch(`/api/entry_record?table=${table}&reference_no=${encodeURIComponent(referenceNo)}&client_id=${currentClientId}`);
+    const data = await res.json();
+    if (data.status === "error") { alert(data.message); return; }
+
+    modifyTargetRef = referenceNo;
+    const ep = systemConfig.entry_points.find(x => x.id === entryId);
+    const lineItemFieldNames = MULTI_ITEM_FIELDS[entryId] || [];
+
+    ep.fields.forEach(f => {
+      if (lineItemFieldNames.includes(f.name)) return;
+      if (f.name === "record_source" || f.name === refFieldName) return;
+      const el = document.getElementById(`input_${f.name}`);
+      if (el && data.header[f.name] !== undefined && data.header[f.name] !== null) {
+        el.value = data.header[f.name];
+      }
+    });
+
+    const items = data.items || [];
+    const countEl = document.getElementById("lineItemCount");
+    if (countEl) countEl.value = items.length || 1;
+    renderLineItemRows(entryId, items.length || 1);
+
+    const setVal = (id, v) => { const e = document.getElementById(id); if (e) e.value = v ?? ""; };
+    items.forEach((item, idx) => {
+      setVal(`li_product_type_${idx}`, item.product_type);
+      setVal(`li_size_${idx}`, item.size);
+      if (entryId === "new_sale") {
+        setVal(`li_cost_price_${idx}`, item.cost_price);
+        setVal(`li_received_quantity_${idx}`, item.received_quantity);
+        setVal(`li_sale_unit_price_${idx}`, item.sale_unit_price);
+      } else {
+        setVal(`li_quantity_${idx}`, item.quantity);
+        setVal(`li_unit_price_${idx}`, item.unit_price);
+      }
+    });
+    recalcLineItemTotals(entryId);
+  } catch (err) {
+    alert("Failed to load record: " + err.message);
+  }
+}
+
+async function buildCustomerModifySelectGroup() {
+  const g = document.createElement("div");
+  g.className = "form-group col-12";
+  const l = document.createElement("label");
+  l.innerText = "Select Customer to Modify *";
+  g.appendChild(l);
+
+  const sel = document.createElement("select");
+  sel.className = "form-control";
+  sel.innerHTML = `<option value="">-- Select Customer --</option>`;
+  try {
+    const res = await apiFetch(`/api/customers?client_id=${currentClientId}`);
+    const list = await res.json();
+    list.forEach(c => {
+      const o = document.createElement("option");
+      o.value = c.id;
+      o.innerText = `${c.customer_name} (${c.customer_type}${c.contact_number ? ' — ' + c.contact_number : ''})`;
+      sel.appendChild(o);
+    });
+  } catch (e) { /* ignore */ }
+  sel.onchange = () => loadCustomerForModify(sel.value);
+  g.appendChild(sel);
+  return g;
+}
+
+async function loadCustomerForModify(customerId) {
+  modifyTargetRef = null;
+  if (!customerId) return;
+  try {
+    const res = await apiFetch(`/api/customers?client_id=${currentClientId}`);
+    const list = await res.json();
+    const c = list.find(x => String(x.id) === String(customerId));
+    if (!c) return;
+    modifyTargetRef = c.id;
+    const setVal = (name, v) => { const e = document.getElementById(`input_${name}`); if (e) e.value = v ?? ""; };
+    setVal("customer_name", c.customer_name);
+    setVal("customer_type", c.customer_type);
+    setVal("contact_number", c.contact_number);
+    setVal("address", c.address);
+  } catch (err) {
+    alert("Failed to load customer: " + err.message);
+  }
+}
+
 function recalcLineItemTotals(entryId) {
   const rowsContainer = document.getElementById("lineItemsContainer");
   if (!rowsContainer) return;
@@ -1244,6 +1398,63 @@ async function handleFormSubmit(event) {
   const formData = new FormData(form);
   const payload = { client_id: currentClientId, created_by: currentUser ? currentUser.username : null };
   for (let [k, v] of formData.entries()) payload[k] = v;
+
+  const isModifyTxn = (currentEntryId === "new_sale" || currentEntryId === "new_purchase") &&
+    currentRecordMode === "Modify";
+  const isModifyCustomer = currentEntryId === "new_customer" && currentRecordMode === "Modify";
+
+  if (isModifyTxn) {
+    if (!modifyTargetRef) { alert("Select a record to modify first."); return; }
+    try {
+      const res = await apiFetch(`/api/entry/${currentEntryId}/modify`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          client_id: currentClientId,
+          original_ref: modifyTargetRef,
+          shared: payload,
+          line_items: collectLineItems(currentEntryId)
+        })
+      });
+      const data = await res.json();
+      if (data.status === "success") {
+        alert(`Record modified successfully (${data.chalan_no || data.input_invoice_no}).`);
+        currentRecordMode = "New";
+        modifyTargetRef = null;
+        await refreshLookups();
+        resetCurrentForm();
+      } else {
+        alert("Error modifying record: " + data.message);
+      }
+    } catch (err) {
+      alert("Connection failure: " + err.message);
+    }
+    return;
+  }
+
+  if (isModifyCustomer) {
+    if (!modifyTargetRef) { alert("Select a customer to modify first."); return; }
+    try {
+      const res = await apiFetch(`/api/record/customers/${modifyTargetRef}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      if (data.status === "success") {
+        alert("Customer updated successfully.");
+        currentRecordMode = "New";
+        modifyTargetRef = null;
+        await refreshLookups();
+        resetCurrentForm();
+      } else {
+        alert("Error updating customer: " + data.message);
+      }
+    } catch (err) {
+      alert("Connection failure: " + err.message);
+    }
+    return;
+  }
 
   const isMultiItem = !!MULTI_ITEM_FIELDS[currentEntryId];
   const url = isMultiItem ? `/api/entry/${currentEntryId}/multi` : `/api/entry/${currentEntryId}`;
