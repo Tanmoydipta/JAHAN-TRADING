@@ -709,6 +709,10 @@ async function renderEntryForm(entryId) {
       input.type = effType === "number" ? "number" : (effType === "date" ? "date" : "text");
       input.className = "form-control";
       if (effType === "number") input.step = "any";
+      // Chrome/Edge render the native date picker's display format based on
+      // the input's `lang` attribute — force en-GB so it shows dd/mm/yyyy
+      // instead of the browser-default mm/dd/yyyy (en-US).
+      if (effType === "date") input.setAttribute("lang", "en-GB");
       if (f.required) input.required = true;
       // Previous (historical backfill) mode always allows editing every
       // normally-readonly field manually — there's no live customer/

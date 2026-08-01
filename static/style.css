@@ -537,8 +537,17 @@ input[readonly] { background: rgba(255,255,255,0.02) !important; color: var(--te
 .form-panel { max-width: 900px; }
 .form-grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 16px; }
 .col-12 { grid-column: span 12; }
+.col-11 { grid-column: span 11; }
+.col-10 { grid-column: span 10; }
+.col-9 { grid-column: span 9; }
+.col-8 { grid-column: span 8; }
+.col-7 { grid-column: span 7; }
 .col-6 { grid-column: span 6; }
+.col-5 { grid-column: span 5; }
 .col-4 { grid-column: span 4; }
+.col-3 { grid-column: span 3; }
+.col-2 { grid-column: span 2; }
+.col-1 { grid-column: span 1; }
 
 .form-group label {
   display: block;
@@ -553,11 +562,15 @@ input[readonly] { background: rgba(255,255,255,0.02) !important; color: var(--te
   background: #0d121f;
   border: 1px solid var(--border-color);
   color: var(--text-main);
-  padding: 10px 14px;
+  padding: 11px 14px;
   border-radius: 8px;
-  font-size: 13px;
+  font-size: 15px;
   outline: none;
   transition: var(--transition);
+}
+
+select.form-control {
+  min-height: 42px;
 }
 
 .form-control:focus {
@@ -818,7 +831,9 @@ input[readonly] { background: rgba(255,255,255,0.02) !important; color: var(--te
   }
 
   .form-grid .col-6,
-  .form-grid .col-4 {
+  .form-grid .col-4,
+  .form-grid .col-3,
+  .form-grid .col-2 {
     grid-column: span 12;
   }
 
