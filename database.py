@@ -757,6 +757,72 @@ def _upsert_product(cursor, mode, client_id, product_type, size, unit_price):
         )
 
 
+def _validate_linked_customers(cursor, mode, client_id, entry_def, data):
+    """Every required customer_select field (Buyer Name, Supplier Name) must
+    resolve to a customer already registered in Customer Registration — the
+    client wants Sales/Purchase entries rejected rather than saved against a
+    free-text name, including one typed into the Previous/Modify combobox
+    that never got matched to a real record.
+    """
+    ph = _ph(mode)
+    for f in entry_def['fields']:
+        if f.get('type') != 'customer_select' or not f.get('required'):
+            continue
+        value = str(data.get(f['name']) or '').strip()
+        if not value:
+            raise ValueError(f"{f['label']} is required and must be an existing registered customer.")
+        cursor.execute(
+            f"SELECT COUNT(*) as cnt FROM customers WHERE client_id = {ph} AND customer_name = {ph} AND customer_type = {ph}",
+            (client_id, value, f.get('customer_type_filter'))
+        )
+        row = cursor.fetchone()
+        cnt = row[0] if mode == 'sqlite' else row['cnt']
+        if not cnt:
+            ctype = f.get('customer_type_filter', '')
+            raise ValueError(
+                f"{f['label']} '{value}' is not a registered {ctype} customer. "
+                f"Please add it in Customer Registration first."
+            )
+
+
+# Per-line-item field names for each multi-item table — mirrors
+# MULTI_ITEM_FIELDS in app.js. Needed here so shared-field validation below
+# can skip them (they're validated per row by the caller, not as a single
+# shared value).
+MULTI_LINE_ITEM_FIELDS = {
+    'sales': {'product_type', 'size', 'cost_price', 'received_quantity', 'sale_unit_price'},
+    'purchases': {'product_type', 'size', 'unit_price', 'quantity'},
+    'quotations': {'product_type', 'size', 'origin', 'unit_price', 'quantity'},
+}
+
+
+def _validate_required_shared_fields(table_name, entry_def, shared_data):
+    """The client wants every field on a Sales/Purchase entry actually
+    filled in — not just the linked customer — so this rejects a submit
+    that's missing any required shared (non-line-item) field, the same way
+    the browser's own `required` attribute does, as a server-side backstop
+    against a direct API call skipping the frontend entirely. Respects
+    show_if: a field only hidden/shown conditionally (Bank Name/LC No for
+    Foreign purchases) is only required while its condition is actually met.
+    """
+    line_item_fields = MULTI_LINE_ITEM_FIELDS.get(table_name, set())
+    for f in entry_def['fields']:
+        if f['name'] in line_item_fields:
+            continue
+        if f['name'] == 'record_source' or f.get('type') == 'customer_select':
+            continue
+        if not f.get('required'):
+            continue
+        show_if = f.get('show_if')
+        if show_if:
+            watched_val = str(shared_data.get(show_if['field'], '') or '').strip()
+            if watched_val != show_if['value']:
+                continue
+        value = shared_data.get(f['name'])
+        if value is None or str(value).strip() == '':
+            raise ValueError(f"{f['label']} is required.")
+
+
 # ---------------- SAVE ENTRY ----------------
 def save_entry(entry_id, data, client_id=None, created_by=None):
     config = load_config()
@@ -841,6 +907,10 @@ def save_entry(entry_id, data, client_id=None, created_by=None):
                         insert_data[f['name']] = float(v)
                     except (TypeError, ValueError):
                         insert_data[f['name']] = 0
+
+        if table_name in ('sales', 'purchases'):
+            _validate_linked_customers(cursor, mode, client_id, entry_def, insert_data)
+            _validate_required_shared_fields(table_name, entry_def, insert_data)
 
         # Filter to only real table columns
         table_cols = {c['name'] for c in config['tables'][table_name]['columns']}
@@ -933,6 +1003,10 @@ def save_multi_item_entry(entry_id, shared_data, line_items, client_id=None, cre
         role = _lookup_user_role(cursor, mode, created_by)
         is_admin = (role == 'admin')
         now = datetime.now().isoformat(timespec='seconds')
+
+        if table_name in ('sales', 'purchases'):
+            _validate_linked_customers(cursor, mode, client_id, entry_def, shared_data)
+            _validate_required_shared_fields(table_name, entry_def, shared_data)
 
         # "Previous" entries are historical/backfill records the client is
         # keying in from paper records — they must never touch inventory
@@ -1176,6 +1250,11 @@ def update_multi_item_entry(entry_id, original_ref, shared_data, line_items, cli
         role = _lookup_user_role(cursor, mode, requested_by)
         if role != 'admin':
             raise ValueError("Only an admin can modify existing records")
+
+        # Validate before touching any data — a rejected edit must never
+        # leave the old rows deleted/reversed with nothing re-inserted.
+        _validate_linked_customers(cursor, mode, client_id, entry_def, shared_data)
+        _validate_required_shared_fields(table_name, entry_def, shared_data)
 
         cursor.execute(
             f"SELECT * FROM {table_name} WHERE {ref_col} = {ph} AND client_id = {ph} ORDER BY id ASC",

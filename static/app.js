@@ -652,7 +652,12 @@ async function renderEntryForm(entryId) {
     } else if (effType === "customer_select") {
       const custList = await getCustomersByType(f.customer_type_filter);
 
-      if (usesManualWidgets(entryId)) {
+      // Required customer_select fields (Buyer Name, Supplier Name) must
+      // always resolve to an existing registered customer — the client
+      // does not want a sale/purchase saveable against a free-text name,
+      // so these stay a locked dropdown even in Previous/Modify mode.
+      // Optional ones (Transporter Name) keep the flexible combo there.
+      if (usesManualWidgets(entryId) && !f.required) {
         // Previous/Modify mode: still linked to the customer catalog
         // (autocompletes and fills contact/address on an exact match) but
         // not locked to it — typing a name that isn't in the list is a
@@ -678,6 +683,7 @@ async function renderEntryForm(entryId) {
       } else {
         input = document.createElement("select");
         input.className = "form-control";
+        if (f.required) input.required = true;
         input.innerHTML = `<option value="">-- Select ${f.customer_type_filter} Customer --</option>`;
         custList.forEach(c => {
           const o = document.createElement("option");
@@ -794,9 +800,18 @@ async function renderEntryForm(entryId) {
   container.querySelectorAll('[data-show-if-field]').forEach(group => {
     const watchEl = document.getElementById(`input_${group.dataset.showIfField}`);
     if (!watchEl) return;
+    const targetEl = group.querySelector('input, select, textarea');
     const update = () => {
-      group.style.display = (watchEl.value === group.dataset.showIfValue) ? "" : "none";
+      const visible = watchEl.value === group.dataset.showIfValue;
+      group.style.display = visible ? "" : "none";
+      // A required field hidden via show_if (e.g. Bank Name/LC No, only
+      // shown for Foreign purchases) must not block submission of the
+      // Domestic case — the browser tries to validate/focus it either way.
+      if (targetEl && targetEl.dataset.originallyRequired === "true") {
+        targetEl.required = visible;
+      }
     };
+    if (targetEl && targetEl.required) targetEl.dataset.originallyRequired = "true";
     watchEl.addEventListener("change", update);
     update();
   });
