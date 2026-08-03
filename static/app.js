@@ -935,6 +935,7 @@ function buildLineItemRow(entryId, idx) {
     );
     productCombo.input.id = `li_product_type_${idx}`;
     productCombo.input.placeholder = "Product name — pick existing or type a new one";
+    productCombo.input.required = true;
     gProduct.appendChild(productCombo.input);
     gProduct.appendChild(productCombo.datalist);
 
@@ -951,13 +952,13 @@ function buildLineItemRow(entryId, idx) {
 
       const gQty = mkGroup(2, "Qty *");
       const inQty = document.createElement("input");
-      inQty.type = "number"; inQty.step = "any"; inQty.className = "form-control"; inQty.id = `li_received_quantity_${idx}`; inQty.value = 0;
+      inQty.type = "number"; inQty.step = "any"; inQty.min = "0.01"; inQty.className = "form-control"; inQty.id = `li_received_quantity_${idx}`; inQty.value = 0; inQty.required = true;
       inQty.oninput = () => recalcLineItemTotals(entryId);
       gQty.appendChild(inQty);
 
       const gPrice = mkGroup(2, "Sale Price *");
       const inPrice = document.createElement("input");
-      inPrice.type = "number"; inPrice.step = "any"; inPrice.className = "form-control"; inPrice.id = `li_sale_unit_price_${idx}`; inPrice.value = 0;
+      inPrice.type = "number"; inPrice.step = "any"; inPrice.min = "0.01"; inPrice.className = "form-control"; inPrice.id = `li_sale_unit_price_${idx}`; inPrice.value = 0; inPrice.required = true;
       inPrice.oninput = () => recalcLineItemTotals(entryId);
       gPrice.appendChild(inPrice);
 
@@ -965,23 +966,24 @@ function buildLineItemRow(entryId, idx) {
     } else {
       const gQty = mkGroup(3, "Quantity *");
       const inQty = document.createElement("input");
-      inQty.type = "number"; inQty.step = "any"; inQty.className = "form-control"; inQty.id = `li_quantity_${idx}`; inQty.value = 0;
+      inQty.type = "number"; inQty.step = "any"; inQty.min = "0.01"; inQty.className = "form-control"; inQty.id = `li_quantity_${idx}`; inQty.value = 0; inQty.required = true;
       inQty.oninput = () => recalcLineItemTotals(entryId);
       gQty.appendChild(inQty);
 
       const gPrice = mkGroup(3, "Unit Price *");
       const inPrice = document.createElement("input");
-      inPrice.type = "number"; inPrice.step = "any"; inPrice.className = "form-control"; inPrice.id = `li_unit_price_${idx}`; inPrice.value = 0;
+      inPrice.type = "number"; inPrice.step = "any"; inPrice.min = "0.01"; inPrice.className = "form-control"; inPrice.id = `li_unit_price_${idx}`; inPrice.value = 0; inPrice.required = true;
       inPrice.oninput = () => recalcLineItemTotals(entryId);
       gPrice.appendChild(inPrice);
 
       row.appendChild(gProduct); row.appendChild(gSize); row.appendChild(gQty); row.appendChild(gPrice);
     }
   } else if (entryId === "new_sale") {
-    const gProduct = mkGroup(4, `Product #${idx + 1} (from Inventory)`);
+    const gProduct = mkGroup(4, `Product #${idx + 1} (from Inventory) *`);
     const selProduct = document.createElement("select");
     selProduct.className = "form-control";
     selProduct.id = `li_product_type_${idx}`;
+    selProduct.required = true;
     selProduct.innerHTML = `<option value="">-- Select from Inventory --</option>`;
     inventoryCache.forEach(item => {
       if ((item.quantity || 0) <= 0) return;
@@ -1014,13 +1016,13 @@ function buildLineItemRow(entryId, idx) {
 
     const gQty = mkGroup(2, "Qty *");
     const inQty = document.createElement("input");
-    inQty.type = "number"; inQty.step = "any"; inQty.className = "form-control"; inQty.id = `li_received_quantity_${idx}`; inQty.value = 0;
+    inQty.type = "number"; inQty.step = "any"; inQty.min = "0.01"; inQty.className = "form-control"; inQty.id = `li_received_quantity_${idx}`; inQty.value = 0; inQty.required = true;
     inQty.oninput = () => recalcLineItemTotals(entryId);
     gQty.appendChild(inQty);
 
     const gPrice = mkGroup(2, "Sale Price *");
     const inPrice = document.createElement("input");
-    inPrice.type = "number"; inPrice.step = "any"; inPrice.className = "form-control"; inPrice.id = `li_sale_unit_price_${idx}`; inPrice.value = 0;
+    inPrice.type = "number"; inPrice.step = "any"; inPrice.min = "0.01"; inPrice.className = "form-control"; inPrice.id = `li_sale_unit_price_${idx}`; inPrice.value = 0; inPrice.required = true;
     inPrice.oninput = () => recalcLineItemTotals(entryId);
     gPrice.appendChild(inPrice);
 
@@ -1030,6 +1032,7 @@ function buildLineItemRow(entryId, idx) {
     const selProduct = document.createElement("select");
     selProduct.className = "form-control";
     selProduct.id = `li_product_type_${idx}`;
+    selProduct.required = true;
     selProduct.innerHTML = `<option value="">-- Select Product --</option>`;
     productsCache.forEach(p => {
       const o = document.createElement("option");
@@ -1064,13 +1067,13 @@ function buildLineItemRow(entryId, idx) {
 
     const gQty = mkGroup(2, "Qty *");
     const inQty = document.createElement("input");
-    inQty.type = "number"; inQty.step = "any"; inQty.className = "form-control"; inQty.id = `li_quantity_${idx}`; inQty.value = 0;
+    inQty.type = "number"; inQty.step = "any"; inQty.min = "0.01"; inQty.className = "form-control"; inQty.id = `li_quantity_${idx}`; inQty.value = 0; inQty.required = true;
     inQty.oninput = () => recalcLineItemTotals(entryId);
     gQty.appendChild(inQty);
 
     const gPrice = mkGroup(3, "Unit Price *");
     const inPrice = document.createElement("input");
-    inPrice.type = "number"; inPrice.step = "any"; inPrice.className = "form-control"; inPrice.id = `li_unit_price_${idx}`; inPrice.value = 0;
+    inPrice.type = "number"; inPrice.step = "any"; inPrice.min = "0.01"; inPrice.className = "form-control"; inPrice.id = `li_unit_price_${idx}`; inPrice.value = 0; inPrice.required = true;
     inPrice.oninput = () => recalcLineItemTotals(entryId);
     gPrice.appendChild(inPrice);
 
@@ -1080,6 +1083,7 @@ function buildLineItemRow(entryId, idx) {
     const selProduct = document.createElement("select");
     selProduct.className = "form-control";
     selProduct.id = `li_product_type_${idx}`;
+    selProduct.required = true;
     selProduct.innerHTML = `<option value="">-- Select Product --</option>`;
     productsCache.forEach(p => {
       const o = document.createElement("option");
@@ -1106,13 +1110,13 @@ function buildLineItemRow(entryId, idx) {
 
     const gQty = mkGroup(3, "Quantity *");
     const inQty = document.createElement("input");
-    inQty.type = "number"; inQty.step = "any"; inQty.className = "form-control"; inQty.id = `li_quantity_${idx}`; inQty.value = 0;
+    inQty.type = "number"; inQty.step = "any"; inQty.min = "0.01"; inQty.className = "form-control"; inQty.id = `li_quantity_${idx}`; inQty.value = 0; inQty.required = true;
     inQty.oninput = () => recalcLineItemTotals(entryId);
     gQty.appendChild(inQty);
 
     const gPrice = mkGroup(3, "Unit Price *");
     const inPrice = document.createElement("input");
-    inPrice.type = "number"; inPrice.step = "any"; inPrice.className = "form-control"; inPrice.id = `li_unit_price_${idx}`; inPrice.value = 0;
+    inPrice.type = "number"; inPrice.step = "any"; inPrice.min = "0.01"; inPrice.className = "form-control"; inPrice.id = `li_unit_price_${idx}`; inPrice.value = 0; inPrice.required = true;
     inPrice.oninput = () => recalcLineItemTotals(entryId);
     gPrice.appendChild(inPrice);
 

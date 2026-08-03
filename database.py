@@ -796,6 +796,38 @@ MULTI_LINE_ITEM_FIELDS = {
 }
 
 
+def _validate_line_items(table_name, line_items):
+    """Every product line item must actually identify a product and carry a
+    real quantity/price. The multi-item insert loop silently defaults a
+    missing product_type to '' and a missing/blank quantity or price to 0
+    (so the row inserts fine but is functionally empty) — this closes that
+    loophole by rejecting the whole submission up front, mirroring
+    _validate_required_shared_fields but for per-row fields, which that
+    function deliberately skips (see MULTI_LINE_ITEM_FIELDS). Size is
+    intentionally NOT enforced here, matching config.json's own
+    `required: false` on the size field for sales/purchases/quotations —
+    it's often auto-derived from the product selection and can legitimately
+    be blank for a product not yet fully catalogued.
+    """
+    qty_field = 'received_quantity' if table_name == 'sales' else 'quantity'
+    price_field = 'sale_unit_price' if table_name == 'sales' else 'unit_price'
+    for idx, li in enumerate(line_items, start=1):
+        if not str(li.get('product_type') or '').strip():
+            raise ValueError(f"Product #{idx}: Product Type is required.")
+        try:
+            qty = float(li.get(qty_field) or 0)
+        except (TypeError, ValueError):
+            qty = 0
+        if qty <= 0:
+            raise ValueError(f"Product #{idx}: Quantity must be greater than 0.")
+        try:
+            price = float(li.get(price_field) or 0)
+        except (TypeError, ValueError):
+            price = 0
+        if price <= 0:
+            raise ValueError(f"Product #{idx}: Unit Price must be greater than 0.")
+
+
 def _validate_required_shared_fields(table_name, entry_def, shared_data):
     """The client wants every field on a Sales/Purchase entry actually
     filled in — not just the linked customer — so this rejects a submit
@@ -911,6 +943,10 @@ def save_entry(entry_id, data, client_id=None, created_by=None):
         if table_name in ('sales', 'purchases'):
             _validate_linked_customers(cursor, mode, client_id, entry_def, insert_data)
             _validate_required_shared_fields(table_name, entry_def, insert_data)
+            # save_entry() only ever handles a single product row; treat it as
+            # a one-item line list so product/size/quantity/price get the same
+            # non-blank, non-zero enforcement as the multi-item path below.
+            _validate_line_items(table_name, [insert_data])
 
         # Filter to only real table columns
         table_cols = {c['name'] for c in config['tables'][table_name]['columns']}
@@ -1007,6 +1043,7 @@ def save_multi_item_entry(entry_id, shared_data, line_items, client_id=None, cre
         if table_name in ('sales', 'purchases'):
             _validate_linked_customers(cursor, mode, client_id, entry_def, shared_data)
             _validate_required_shared_fields(table_name, entry_def, shared_data)
+        _validate_line_items(table_name, line_items)
 
         # "Previous" entries are historical/backfill records the client is
         # keying in from paper records — they must never touch inventory
@@ -1255,6 +1292,7 @@ def update_multi_item_entry(entry_id, original_ref, shared_data, line_items, cli
         # leave the old rows deleted/reversed with nothing re-inserted.
         _validate_linked_customers(cursor, mode, client_id, entry_def, shared_data)
         _validate_required_shared_fields(table_name, entry_def, shared_data)
+        _validate_line_items(table_name, line_items)
 
         cursor.execute(
             f"SELECT * FROM {table_name} WHERE {ref_col} = {ph} AND client_id = {ph} ORDER BY id ASC",
