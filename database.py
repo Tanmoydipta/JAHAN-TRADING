@@ -630,23 +630,33 @@ def list_customers(client_id, customer_type=None):
 
 
 def list_invoice_refs(ref_type, client_id):
-    """List existing sale chalans or purchase invoice numbers (with their
-    quantity) for the Transporter Entry form's reference-number dropdown."""
+    """List existing sale chalans or purchase invoice numbers — with customer
+    name, grand total, transporter/truck, and total quantity/locations —
+    for the Transporter Entry form's reference-number dropdown. Grouped by
+    reference number since a multi-item sale/purchase spreads one chalan/
+    invoice across several rows; SUM() gives the true total quantity/amount
+    the transporter needs to move rather than just one line item's share."""
     conn, mode = get_db_connection()
     cursor = conn.cursor()
     ph = _ph(mode)
     if ref_type == 'sales':
         cursor.execute(
-            f"SELECT chalan_no as reference_no, received_quantity as quantity, "
-            f"loading_location as from_location, unloading_location as to_location "
-            f"FROM sales WHERE client_id = {ph} ORDER BY id DESC",
+            f"SELECT chalan_no as reference_no, buyer_name as customer_name, "
+            f"SUM(sale_total_price) as total_amount, SUM(received_quantity) as quantity, "
+            f"MAX(transporter_name) as transporter_name, MAX(truck_no) as truck_no, "
+            f"MAX(loading_location) as from_location, MAX(unloading_location) as to_location "
+            f"FROM sales WHERE client_id = {ph} "
+            f"GROUP BY chalan_no, buyer_name ORDER BY MAX(id) DESC",
             (client_id,)
         )
     elif ref_type == 'purchases':
         cursor.execute(
-            f"SELECT input_invoice_no as reference_no, quantity, "
-            f"loading_location as from_location, unloading_location as to_location "
-            f"FROM purchases WHERE client_id = {ph} ORDER BY id DESC",
+            f"SELECT input_invoice_no as reference_no, supplier_name as customer_name, "
+            f"SUM(total) as total_amount, SUM(quantity) as quantity, "
+            f"MAX(transporter_name) as transporter_name, MAX(truck_no) as truck_no, "
+            f"MAX(loading_location) as from_location, MAX(unloading_location) as to_location "
+            f"FROM purchases WHERE client_id = {ph} "
+            f"GROUP BY input_invoice_no, supplier_name ORDER BY MAX(id) DESC",
             (client_id,)
         )
     else:
@@ -913,9 +923,14 @@ def save_entry(entry_id, data, client_id=None, created_by=None):
             insert_data['due'] = round(max(0.0, insert_data['total'] - advance), 2)
 
         elif table_name == 'transporters':
-            rent = float(insert_data.get('rent') or 0)
+            # Rent is always authoritative server-side (rate * qty), same
+            # pattern as sales/purchase totals below — never trust a client-
+            # submitted rent value.
+            qty = float(insert_data.get('quantity') or 0)
+            rate = float(insert_data.get('unit_rate_per_ton') or 0)
+            insert_data['rent'] = round(qty * rate, 2)
             advance = float(insert_data.get('advance') or 0)
-            insert_data['due'] = round(max(0.0, rent - advance), 2)
+            insert_data['due'] = round(max(0.0, insert_data['rent'] - advance), 2)
 
         # Sales/purchase transactions require admin authorization unless the
         # submitter is already an admin (auto-authorized).

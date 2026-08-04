@@ -716,6 +716,7 @@ async function renderEntryForm(entryId) {
     } else if (effType === "invoice_ref_select") {
       input = document.createElement("select");
       input.className = "form-control";
+      if (f.required) input.required = true;
       input.innerHTML = `<option value="">-- Select Reference --</option>`;
       input.dataset.dependsOn = f.depends_on || "";
       const populateInvoiceRefs = async () => {
@@ -732,7 +733,10 @@ async function renderEntryForm(entryId) {
             o.dataset.quantity = ref.quantity || 0;
             o.dataset.fromLocation = ref.from_location || "";
             o.dataset.toLocation = ref.to_location || "";
-            o.innerText = ref.reference_no;
+            o.dataset.transporterName = ref.transporter_name || "";
+            o.dataset.truckNo = ref.truck_no || "";
+            const totalStr = parseFloat(ref.total_amount || 0).toFixed(2);
+            o.innerText = `${ref.reference_no} — ${ref.customer_name || "Unknown"} (BDT ${totalStr})`;
             input.appendChild(o);
           });
         } catch (e) { /* ignore */ }
@@ -746,6 +750,22 @@ async function renderEntryForm(entryId) {
         if (fromEl) fromEl.value = opt.dataset.fromLocation || "";
         const toEl = document.getElementById("input_to_location");
         if (toEl) toEl.value = opt.dataset.toLocation || "";
+        const transEl = document.getElementById("input_transporter_name");
+        if (transEl) transEl.value = opt.dataset.transporterName || "";
+        const truckEl = document.getElementById("input_truck_no");
+        if (truckEl) truckEl.value = opt.dataset.truckNo || "";
+        // Best-effort contact/address lookup against the registered
+        // Transport-type customer catalog, matched by the transporter name
+        // stored on the sale/purchase record itself.
+        (async () => {
+          const custList = await getCustomersByType("Transport");
+          const match = custList.find(c => c.customer_name === (opt.dataset.transporterName || ""));
+          const contactEl = document.getElementById("input_contact_number");
+          if (contactEl) contactEl.value = match ? (match.contact_number || "") : "";
+          const addressEl = document.getElementById("input_address");
+          if (addressEl) addressEl.value = match ? (match.address || "") : "";
+        })();
+        if (typeof calculateTransporterTotal === "function") calculateTransporterTotal();
       };
     } else {
       input = document.createElement("input");
@@ -778,7 +798,7 @@ async function renderEntryForm(entryId) {
       input.oninput = calculateSalesTotal;
     } else if (ep.table === 'purchases' && ['quantity', 'unit_price', 'advance'].includes(f.name)) {
       input.oninput = calculatePurchaseTotal;
-    } else if (ep.table === 'transporters' && ['rent', 'advance'].includes(f.name)) {
+    } else if (ep.table === 'transporters' && ['unit_rate_per_ton', 'advance'].includes(f.name)) {
       input.oninput = calculateTransporterTotal;
     }
 
@@ -1301,9 +1321,14 @@ function calculatePurchaseTotal() {
 }
 
 function calculateTransporterTotal() {
-  const rent = parseFloat(document.getElementById("input_rent")?.value || 0);
+  const qty = parseFloat(document.getElementById("input_quantity")?.value || 0);
+  const rate = parseFloat(document.getElementById("input_unit_rate_per_ton")?.value || 0);
   const adv = parseFloat(document.getElementById("input_advance")?.value || 0);
+  const rent = qty * rate;
   const due = Math.max(0, rent - adv);
+
+  const rentEl = document.getElementById("input_rent");
+  if (rentEl) rentEl.value = rent.toFixed(2);
 
   document.getElementById("liveCalculatedTotal").innerText = `BDT ${rent.toFixed(2)}`;
   document.getElementById("liveCalculatedDue").innerText = `BDT ${due.toFixed(2)}`;
