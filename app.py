@@ -13,7 +13,7 @@ from database import (
     list_inventory, get_dashboard,
     authorize_entry, list_pending_transactions,
     delete_entry, delete_user, update_user, update_record,
-    adjust_entry, list_invoice_refs,
+    adjust_entry, list_invoice_refs, list_report_customer_options, list_report_po_options,
     list_modifiable_refs, get_editable_record, update_multi_item_entry,
     create_session_token, verify_session_token, revoke_session_token,
     get_letterhead_settings, save_letterhead_settings,
@@ -325,11 +325,12 @@ def api_get_report(report_id):
         date_from = request.args.get('from') or None
         date_to = request.args.get('to') or None
         customer = request.args.get('customer') or None
+        po_order = request.args.get('po_order') or None
         txn_type = request.args.get('txn_type') or None
         record_mode = request.args.get('record_mode') or None
         res = execute_report(report_id, client_id=client_id,
                              date_from=date_from, date_to=date_to,
-                             customer=customer, txn_type=txn_type,
+                             customer=customer, po_order=po_order, txn_type=txn_type,
                              record_mode=record_mode)
         return jsonify(res)
     except Exception as e:
@@ -435,6 +436,32 @@ def api_update_user(user_id):
         return jsonify(update_user(user_id, request.current_user['username'], new_username, new_password))
     except ValueError as e:
         return jsonify({"status": "error", "message": str(e)}), 403
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+
+
+@app.route('/api/report/<report_id>/customer_options', methods=['GET'])
+def api_report_customer_options(report_id):
+    client_id = _scoped_client_id(request.args.get('client_id'))
+    if client_id is None:
+        return _forbidden()
+    try:
+        return jsonify(list_report_customer_options(report_id, client_id))
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+
+
+@app.route('/api/report/<report_id>/po_options', methods=['GET'])
+def api_report_po_options(report_id):
+    client_id = _scoped_client_id(request.args.get('client_id'))
+    if client_id is None:
+        return _forbidden()
+    try:
+        customer = request.args.get('customer') or None
+        date_from = request.args.get('from') or None
+        date_to = request.args.get('to') or None
+        return jsonify(list_report_po_options(report_id, client_id, customer=customer,
+                                              date_from=date_from, date_to=date_to))
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 400
 

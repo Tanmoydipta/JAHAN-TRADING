@@ -629,6 +629,68 @@ def list_customers(client_id, customer_type=None):
     return [dict(r) for r in rows]
 
 
+def list_report_customer_options(report_id, client_id):
+    """Distinct customer/buyer/supplier/transporter names valid for a
+    report's customer filter dropdown, pulled straight from the transaction
+    tables themselves (not the customers catalog) — Previous-mode/free-text
+    names and non-'Sales'-type parties (suppliers, transporters) all need to
+    be selectable too, and the filter itself does an exact match against
+    these same values."""
+    config = load_config()
+    report_def = next((rp for rp in config.get('report_points', []) if rp['id'] == report_id), None)
+    if not report_def or not report_def.get('supports_customer_filter'):
+        return []
+    conn, mode = get_db_connection()
+    cursor = conn.cursor()
+    ph = _ph(mode)
+    names = set()
+
+    def _collect(sql, col):
+        cursor.execute(sql, (client_id,))
+        for r in cursor.fetchall():
+            v = r[0] if mode == 'sqlite' else r[col]
+            if v:
+                names.add(v)
+
+    if report_id == 'sales_report':
+        _collect(f"SELECT DISTINCT buyer_name FROM sales WHERE client_id = {ph} AND status = 'authorized'", 'buyer_name')
+    else:
+        _collect(f"SELECT DISTINCT buyer_name FROM sales WHERE client_id = {ph} AND status = 'authorized'", 'buyer_name')
+        _collect(f"SELECT DISTINCT supplier_name FROM purchases WHERE client_id = {ph} AND status = 'authorized'", 'supplier_name')
+        _collect(f"SELECT DISTINCT transporter_name FROM transporters WHERE client_id = {ph}", 'transporter_name')
+    conn.close()
+    return sorted(names)
+
+
+def list_report_po_options(report_id, client_id, customer=None, date_from=None, date_to=None):
+    """Distinct PO Order numbers for the Total Sales Report's cascading PO
+    filter — scoped to the currently selected customer and date range (if
+    any) so the dropdown only ever offers POs that actually exist for that
+    slice, matching the exact-match {po_filter} the backend applies."""
+    config = load_config()
+    report_def = next((rp for rp in config.get('report_points', []) if rp['id'] == report_id), None)
+    if not report_def or not report_def.get('supports_po_filter'):
+        return []
+    conn, mode = get_db_connection()
+    cursor = conn.cursor()
+    ph = _ph(mode)
+    sql = f"SELECT DISTINCT po_order FROM sales WHERE client_id = {ph} AND status = 'authorized'"
+    params = [client_id]
+    if customer:
+        sql += f" AND buyer_name = {ph}"
+        params.append(customer)
+    if date_from:
+        sql += f" AND sale_date >= {ph}"
+        params.append(date_from)
+    if date_to:
+        sql += f" AND sale_date <= {ph}"
+        params.append(date_to)
+    cursor.execute(sql, params)
+    names = sorted({(r[0] if mode == 'sqlite' else r['po_order']) for r in cursor.fetchall() if (r[0] if mode == 'sqlite' else r['po_order'])})
+    conn.close()
+    return names
+
+
 def list_invoice_refs(ref_type, client_id):
     """List existing sale chalans or purchase invoice numbers — with customer
     name, grand total, transporter/truck, and total quantity/locations —
@@ -1452,16 +1514,26 @@ def update_multi_item_entry(entry_id, original_ref, shared_data, line_items, cli
 
 # ---------------- QUOTATIONS ----------------
 def get_next_quotation_no(client_id):
+    # Based on the MAX numeric suffix among existing quotation_no values,
+    # not a row/distinct count — a count-based scheme collides forever once
+    # any gap appears (a deleted quotation, or a number skipped for any
+    # reason): the count stops matching the highest number actually in use,
+    # so every new quotation keeps recomputing the same already-taken
+    # number. MAX is immune to gaps since it only looks at what's highest.
     config = load_config()
     pad = int(config['system'].get('chalan_pad', 6))
     conn, mode = get_db_connection()
     cursor = conn.cursor()
     ph = _ph(mode)
-    cursor.execute(f"SELECT COUNT(DISTINCT quotation_no) as cnt FROM quotations WHERE client_id = {ph}", (client_id,))
-    row = cursor.fetchone()
-    count = row[0] if mode == 'sqlite' else row['cnt']
+    cursor.execute(f"SELECT quotation_no FROM quotations WHERE client_id = {ph}", (client_id,))
+    rows = cursor.fetchall()
     conn.close()
-    next_no = int(count or 0) + 1
+    max_no = 0
+    for r in rows:
+        qno = r[0] if mode == 'sqlite' else r['quotation_no']
+        if qno and qno.startswith('QT-') and qno[3:].isdigit():
+            max_no = max(max_no, int(qno[3:]))
+    next_no = max_no + 1
     return f"QT-{str(next_no).zfill(pad)}"
 
 
@@ -1507,6 +1579,7 @@ def get_quotation_data(quotation_no, client_id=None):
         "quotation_date": header.get('quotation_date'),
         "status": header.get('status'),
         "address": header.get('address'),
+        "project_location": header.get('project_location'),
         "transport_terms": header.get('transport_terms'),
         "weighing_terms": header.get('weighing_terms'),
         "payment_terms": header.get('payment_terms'),
@@ -1913,7 +1986,7 @@ def _record_mode_clause(table, record_mode):
 
 
 def execute_report(report_id, client_id=None, date_from=None, date_to=None,
-                   customer=None, txn_type=None, record_mode=None):
+                   customer=None, po_order=None, txn_type=None, record_mode=None):
     config = load_config()
     if not client_id:
         client_id = config['system'].get('default_client_id', 'CLI-001')
@@ -1972,8 +2045,14 @@ def execute_report(report_id, client_id=None, date_from=None, date_to=None,
         customer_filter_sql = f" AND {filter_col} = :customer"
         params['customer'] = customer
 
+    po_filter_sql = ""
+    if report_def.get('supports_po_filter') and po_order:
+        po_filter_sql = " AND po_order = :po_order"
+        params['po_order'] = po_order
+
     sql = (sql.replace("{date_filter}", date_filter_sql)
               .replace("{customer_filter}", customer_filter_sql)
+              .replace("{po_filter}", po_filter_sql)
               .replace("{rm_sales}", _record_mode_clause('sales', record_mode_eff))
               .replace("{rm_purchases}", _record_mode_clause('purchases', record_mode_eff))
               .replace("{rm_transport}", _record_mode_clause('transporters', record_mode_eff)))
@@ -2008,6 +2087,7 @@ def execute_report(report_id, client_id=None, date_from=None, date_to=None,
         "summary_total": round(total_summary, 2),
         "supports_period": bool(report_def.get('supports_period')),
         "supports_customer_filter": bool(report_def.get('supports_customer_filter')),
+        "supports_po_filter": bool(report_def.get('supports_po_filter')),
         "supports_record_mode": bool(report_def.get('supports_record_mode'))
     }
 

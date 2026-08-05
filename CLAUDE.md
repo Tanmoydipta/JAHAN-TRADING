@@ -19,7 +19,7 @@ Flask + vanilla JS ERP system for a trading/inventory business. Config-driven sc
 - `transporters` — id, client_id, entry_date, transporter_name, truck_no, movement_type, reference_no, quantity, **from_location**, **to_location**, **unit_rate_per_ton**, rent, advance, due, **address**
 - `purchases` — id, client_id, input_invoice_no, purchase_date, supplier_name, mobile_number, product_type, size, unit_price, quantity, total, transporter_name, truck_no, loading_location, **unloading_location**, advance, due, **record_source** (`'New'`/`'Previous'`, default `'New'`), **address**
 - `sales` — id, client_id, chalan_no, sale_date, buyer_name, contact_number, product_type, size, received_quantity, cost_price, sale_unit_price, sale_total_price, po_order, transporter_name, truck_no, **loading_location**, unloading_location, advance, due, **record_source** (`'New'`/`'Previous'`, default `'New'`), **address**
-- `quotations` — id, client_id, quotation_no, quotation_date, customer_name, product_type, size, origin, unit_price, quantity, total, status (`pending`/`approved`), created_by, authorized_by, authorized_at, **address**
+- `quotations` — id, client_id, quotation_no, quotation_date, customer_name, product_type, size, origin, unit_price, quantity, total, status (`pending`/`approved`), created_by, authorized_by, authorized_at, **address**, **project_location**
 - `challan_uploads` — id, client_id, chalan_no, file_name, drive_file_id, drive_view_url, uploaded_by, uploaded_at (one row per chalan_no — see Google Drive section)
 
 Seed data (`seed_admin_and_demo()`): admin user (`admin`/`admin123`, role=`admin`, client_id=`CLI-001`), 5 demo products (Steel Rod 12mm/16mm, Hydraulic Valve, Brass Fitting, Bearing Set).
@@ -62,7 +62,8 @@ Config is cached in-memory with mtime-based invalidation (`load_config()` / `inv
 
 Each report definition supports these optional flags:
 - `supports_period: true` — shows the date range filter in the toolbar
-- `supports_customer_filter: true` — shows the customer name filter
+- `supports_customer_filter: true` — shows the customer name filter (a **dropdown**, not free text — see below)
+- `supports_po_filter: true` — shows a PO Order dropdown, cascaded off the customer filter and date range (currently `sales_report` only — see below)
 - `supports_txn_type_filter: true` — shows a Sales/Purchase/Transport/All dropdown (currently on `customer_dues_report` only)
 
 Reports include built-in action buttons depending on configuration:
@@ -75,6 +76,14 @@ Reports include built-in action buttons depending on configuration:
 - **Approve** button: available on quotation_report only when `row.status === 'pending'` and user is admin — calls the approve endpoint for that quotation_no
 
 A new **Customer Directory** report (`customer_report`) lists all customers with name, type, and contact number, with Edit and Delete actions available to admins.
+
+### Customer + PO Order dropdown filters (sales_report, customer_transactions_report)
+
+The toolbar's "Customer" filter (`reportCustomerFilter` in `index.html`) is a **dropdown**, not a free-text box — it used to be a plain `<input>`, but the backend's `{customer_filter}` clause (`execute_report()` in `database.py`) always did an *exact* match (`= :customer`), so a partial-text box was actually broken UX (nothing matched unless you typed the full name exactly). The dropdown's options come from `GET /api/report/<report_id>/customer_options` (`list_report_customer_options()`), which pulls **distinct names straight from the transaction tables themselves** (sales/purchases/transporters), not the `customers` catalog — this way Previous-mode/free-text names and non-"Sales"-type parties (suppliers, transporters) are all selectable, and every option is guaranteed to match something. `sales_report` uses `buyer_name` only; `customer_transactions_report` (and any future union-style report) pools `buyer_name` + `supplier_name` + `transporter_name` since its rows can be any of the three. `populateReportCustomerFilter()` in `app.js` refetches this list whenever a report with `supports_customer_filter` is opened.
+
+`sales_report` additionally has a **PO Order** dropdown (`reportPoFilter`, `poFilterWrap`), populated by `GET /api/report/<report_id>/po_options` (`list_report_po_options()`) from distinct `sales.po_order` values. It's **cascading**: changing the Customer dropdown or either date field calls `populateReportPoFilter()` again, which re-fetches PO options scoped to the currently-selected customer/date-range (`customer`/`from`/`to` query params) — so the PO list only ever shows orders that actually exist for that slice. The backend's `{po_filter}` clause in `execute_report()` mirrors `{customer_filter}`'s exact-match pattern, gated by `supports_po_filter` + `po_order = :po_order`. This filter is sales-only (`purchases`/`transporters` have no `po_order` column) so it isn't offered on `customer_transactions_report`.
+
+`sales_report` and `customer_transactions_report` both gained **PO Order** and **Truck #** columns (`po_order`, `truck_no`) — pulled straight off `sales`, and for `customer_transactions_report`'s Purchase/Transport UNION branches, `po_order` is selected as `NULL` (only `sales` has that column) while `truck_no` is real (all three tables have it). No special frontend code was needed for either column — the report table, PDF export, and print view are all fully generic off `data.columns`/`data.keys`/`data.data` (`loadReportData()` / `buildReportPrintDocument()` in `app.js`), so adding a column to a report's config `query`/`columns` is sufficient on its own.
 
 ### Record mode (New/Previous) report filter
 
@@ -160,9 +169,11 @@ Backend (`database.py → update_record()`):
 Backend (`database.py`):
 - `save_multi_item_entry()` was extended to accept `table_name == 'quotations'` alongside sales/purchases — it shares the same line-item-total computation as purchases (`quantity`/`unit_price`/`total`), just with no advance/due and no inventory side-effects.
 - Quotations always save with `status = 'pending'` regardless of who creates them — an admin must explicitly approve via `quotation_report`'s **Approve** button (`approve_quotation()`), which flips every row sharing that quotation_no to `status = 'approved'`.
-- `get_next_quotation_no()` — `QT-` prefix + zero-padded counter (`COUNT(DISTINCT quotation_no)` + 1, padded per `system.chalan_pad`).
-- `get_quotation_data(quotation_no, client_id)` — returns header + all line items + `grand_total`, used both by the print pad (`openQuotationModal()` in `app.js`) and by Sales Entry's auto-fill.
+- `get_next_quotation_no()` — `QT-` prefix + zero-padded counter, based on the **MAX numeric suffix** among existing `quotation_no` values (not a count). **Fixed bug**: it used to be `COUNT(DISTINCT quotation_no) + 1`, which collides forever once any gap appears in the sequence (a deleted quotation, or any number skipped for any reason) — the count stops matching the highest number actually in use, so every new quotation recomputes the *same* already-taken number (observed in production: every new quotation kept saving as `QT-000005` once a gap opened up after `QT-000002` went missing). MAX is immune to gaps since it only looks at what's highest, not how many rows exist. Fixing this required manually renumbering the duplicate rows already sitting in the live DB (four rows sharing `QT-000005` got spread across `QT-000005`/`QT-000006`/`QT-000007`/`QT-000008` by `id`) — a one-time cleanup, not something the code does automatically.
+- `get_quotation_data(quotation_no, client_id)` — returns header + all line items + `grand_total` + `project_location`, used both by the print pad (`openQuotationModal()` in `app.js`) and by Sales Entry's auto-fill.
 - `list_quotation_refs(client_id)` — only **approved** quotations, for the Sales Entry dropdown.
+
+`quotations` has a **Project Location** field (`project_location`, plain text, optional) — the physical job-site address for that quote, distinct from the customer's own `address`. Rendered in `new_quotation` right after Address, and shown as a column in `quotation_report`. It also feeds the print pad's Sub/intro lines (`qpSubLine`/`qpIntroPara` in `openQuotationModal()`) when present, e.g. "...for BASUNDARA's Project at Mirsarai Zone."
 
 Printing: `new_quotation`'s save success handler calls `openQuotationModal(data.quotation_no)` automatically (mirrors `openInvoiceModal()` for sales). The quotation pad is a separate modal (`#quotationModal` in `index.html`) with its own element ids (`qp*` prefix) but shares the same `.business-pad-paper`/`.pad-*` CSS classes and the `applyPadBackground()` helper in `app.js`, so header/footer/signature alignment stays identical to the invoice pad.
 
@@ -170,6 +181,7 @@ Printing: `new_quotation`'s save success handler calls `openQuotationModal(data.
 
 `new_sale`'s field list has an extra `quotation_no` field (`type: "quotation_ref_select"`), rendered as a dropdown populated from `/api/quotation_refs`. Leaving it on `-- No Quotation --` changes nothing (manual entry as before). Selecting one calls `applyQuotationToSale(quotationNo)` in `app.js`, which:
 - fetches `/api/quotation/<no>`, sets `buyer_name` (injecting a transient `<option>` if that customer isn't already registered)
+- fills `unloading_location` from the quotation's `project_location` (when set) — the quotation names the job site, which is where the goods actually get dropped off
 - sets the "Number of Products" count to the quotation's item count and re-renders the line-item rows
 - fills each row's product/size/quantity/price from the matching quotation item, injecting a transient inventory option if that product/size isn't currently in stock (`(from quotation — not currently in stock)`)
 
@@ -288,7 +300,7 @@ A single Sales or Purchase transaction can now include multiple product line ite
 
 ## Schema migration pattern
 
-New columns are added to live DBs automatically via `_migrate_missing_columns()` in `database.py` — it runs `ALTER TABLE ... ADD COLUMN` for any column in `config.json → tables` that is missing from the live schema. No manual DB migration is ever needed; just add the column to config and restart. Columns added in the last major sessions: `unloading_location` (purchases), `loading_location` (sales), `from_location`/`to_location` (transporters), `origin` (products), `record_source` (sales, purchases), `unit_rate_per_ton` (transporters). The `letterhead_settings` table (not config-driven — see below) gets its own small ad-hoc migration in `_ensure_letterhead_table()` for the same reason (`footer_height_px` added this session).
+New columns are added to live DBs automatically via `_migrate_missing_columns()` in `database.py` — it runs `ALTER TABLE ... ADD COLUMN` for any column in `config.json → tables` that is missing from the live schema. No manual DB migration is ever needed; just add the column to config and restart. Columns added in the last major sessions: `unloading_location` (purchases), `loading_location` (sales), `from_location`/`to_location` (transporters), `origin` (products), `record_source` (sales, purchases), `unit_rate_per_ton` (transporters), `project_location` (quotations). The `letterhead_settings` table (not config-driven — see below) gets its own small ad-hoc migration in `_ensure_letterhead_table()` for the same reason (`footer_height_px` added this session).
 
 ## Full session history
 

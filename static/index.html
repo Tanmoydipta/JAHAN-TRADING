@@ -272,12 +272,20 @@
               <div class="toolbar-right">
                 <div class="period-filter" id="periodFilter" style="display:none;">
                   <label>From</label>
-                  <input type="date" id="reportDateFrom" class="form-control filter-input" lang="en-GB">
+                  <input type="date" id="reportDateFrom" class="form-control filter-input" lang="en-GB" onchange="if(currentReportId) populateReportPoFilter(currentReportId);">
                   <label>To</label>
-                  <input type="date" id="reportDateTo" class="form-control filter-input" lang="en-GB">
+                  <input type="date" id="reportDateTo" class="form-control filter-input" lang="en-GB" onchange="if(currentReportId) populateReportPoFilter(currentReportId);">
                   <div id="customerFilterWrap" style="display:none;">
                     <label>Customer</label>
-                    <input type="text" id="reportCustomerFilter" class="form-control filter-input" placeholder="Buyer name">
+                    <select id="reportCustomerFilter" class="form-control filter-input" style="min-width:180px;" onchange="if(currentReportId) populateReportPoFilter(currentReportId);">
+                      <option value="">-- All Customers --</option>
+                    </select>
+                  </div>
+                  <div id="poFilterWrap" style="display:none;">
+                    <label>PO Order</label>
+                    <select id="reportPoFilter" class="form-control filter-input" style="min-width:160px;">
+                      <option value="">-- All PO Orders --</option>
+                    </select>
                   </div>
                   <div id="txnTypeFilterWrap" style="display:none; align-items:center; gap:6px;">
                     <label>Type</label>

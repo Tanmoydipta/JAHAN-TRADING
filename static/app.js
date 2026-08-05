@@ -1400,6 +1400,12 @@ async function applyQuotationToSale(quotationNo) {
       if (addressEl) addressEl.value = data.address || matched.dataset.address || "";
     }
 
+    // Project Location on the quotation feeds the Sales Entry's Unloading
+    // Location — the quotation names where the job site is, which is where
+    // the goods actually get dropped off.
+    const unloadEl = document.getElementById("input_unloading_location");
+    if (unloadEl && data.project_location) unloadEl.value = data.project_location;
+
     const items = data.items || [];
     const countEl = document.getElementById("lineItemCount");
     if (countEl) countEl.value = items.length || 1;
@@ -1546,6 +1552,12 @@ async function renderReportView(reportId) {
   const periodFilter = document.getElementById("periodFilter");
   periodFilter.style.display = rp.supports_period ? "flex" : "none";
   document.getElementById("customerFilterWrap").style.display = rp.supports_customer_filter ? "block" : "none";
+  if (rp.supports_customer_filter) await populateReportCustomerFilter(reportId);
+  const poFilterWrap = document.getElementById("poFilterWrap");
+  if (poFilterWrap) {
+    poFilterWrap.style.display = rp.supports_po_filter ? "block" : "none";
+    if (rp.supports_po_filter) await populateReportPoFilter(reportId);
+  }
   const txnTypeWrap = document.getElementById("txnTypeFilterWrap");
   if (txnTypeWrap) {
     txnTypeWrap.style.display = rp.supports_txn_type_filter ? "flex" : "none";
@@ -1592,10 +1604,61 @@ const EDITABLE_REPORT_TABLES = {
   customer_report: { table: "customers", entryPointId: "new_customer" }
 };
 
+// Populates the report toolbar's Customer dropdown with the distinct
+// names actually present in that report's own transaction data (not the
+// customers catalog — see list_report_customer_options() for why), so
+// every option is guaranteed to match something via the exact-match
+// {customer_filter} the backend applies.
+async function populateReportCustomerFilter(reportId) {
+  const sel = document.getElementById("reportCustomerFilter");
+  if (!sel) return;
+  const prevValue = sel.value;
+  try {
+    const r = await apiFetch(`/api/report/${reportId}/customer_options?client_id=${currentClientId}`);
+    const names = await r.json();
+    sel.innerHTML = `<option value="">-- All Customers --</option>`;
+    names.forEach(name => {
+      const o = document.createElement("option");
+      o.value = name; o.innerText = name;
+      sel.appendChild(o);
+    });
+    if (prevValue && names.includes(prevValue)) sel.value = prevValue;
+  } catch (e) { /* ignore */ }
+}
+
+// Populates the Total Sales Report's PO Order dropdown, scoped to whatever
+// customer/date range is currently selected in the toolbar — so after
+// picking a customer, the PO list narrows to just that customer's orders
+// (cascading), and picking a PO then further narrows the report itself.
+async function populateReportPoFilter(reportId) {
+  const sel = document.getElementById("reportPoFilter");
+  if (!sel) return;
+  const prevValue = sel.value;
+  const customer = document.getElementById("reportCustomerFilter")?.value || "";
+  const df = document.getElementById("reportDateFrom")?.value || "";
+  const dt = document.getElementById("reportDateTo")?.value || "";
+  const params = new URLSearchParams({ client_id: currentClientId });
+  if (customer) params.append("customer", customer);
+  if (df) params.append("from", df);
+  if (dt) params.append("to", dt);
+  try {
+    const r = await apiFetch(`/api/report/${reportId}/po_options?${params.toString()}`);
+    const pos = await r.json();
+    sel.innerHTML = `<option value="">-- All PO Orders --</option>`;
+    pos.forEach(po => {
+      const o = document.createElement("option");
+      o.value = po; o.innerText = po;
+      sel.appendChild(o);
+    });
+    if (prevValue && pos.includes(prevValue)) sel.value = prevValue;
+  } catch (e) { /* ignore */ }
+}
+
 async function loadReportData(reportId) {
   const df = document.getElementById("reportDateFrom")?.value || "";
   const dt = document.getElementById("reportDateTo")?.value || "";
   const cust = document.getElementById("reportCustomerFilter")?.value || "";
+  const po = document.getElementById("reportPoFilter")?.value || "";
   const txnType = document.getElementById("reportTxnTypeFilter")?.value || "";
   const recordMode = document.getElementById("reportRecordModeFilter")?.value || "";
 
@@ -1603,6 +1666,7 @@ async function loadReportData(reportId) {
   if (df) params.append("from", df);
   if (dt) params.append("to", dt);
   if (cust) params.append("customer", cust);
+  if (po) params.append("po_order", po);
   if (txnType && txnType !== "All") params.append("txn_type", txnType);
   if (recordMode) params.append("record_mode", recordMode);
 
@@ -1955,9 +2019,13 @@ function clearReportFilters() {
   document.getElementById("reportDateFrom").value = "";
   document.getElementById("reportDateTo").value = "";
   const c = document.getElementById("reportCustomerFilter"); if (c) c.value = "";
+  const p = document.getElementById("reportPoFilter"); if (p) p.value = "";
   const t = document.getElementById("reportTxnTypeFilter"); if (t) t.value = "All";
   const r = document.getElementById("reportRecordModeFilter"); if (r) r.value = "New";
-  if (currentReportId) loadReportData(currentReportId);
+  if (currentReportId) {
+    populateReportPoFilter(currentReportId);
+    loadReportData(currentReportId);
+  }
 }
 
 async function approveQuotationRow(quotationNo) {
@@ -2384,11 +2452,12 @@ async function openQuotationModal(quotationNo) {
     // items rather than hardcoded, so it reads correctly for both a single-
     // product quote and a multi-product one.
     const itemsSummary = summarizeQuotationItems(items);
+    const projectSuffix = data.project_location ? ` at ${data.project_location}` : "";
     document.getElementById("qpSubLine").innerText =
-      `Offer Letter to Supply ${itemsSummary} for ${data.customer_name || 'your'} Project.`;
+      `Offer Letter to Supply ${itemsSummary} for ${data.customer_name || 'your'} Project${projectSuffix}.`;
     document.getElementById("qpIntroPara").innerText =
       `We are pleased to offer you the rate quotation for supply of ${itemsSummary} for your ` +
-      `${data.customer_name || ''} requirement. The rate, terms and conditions, and mode of payment are given below.`;
+      `${data.customer_name || ''} requirement${projectSuffix}. The rate, terms and conditions, and mode of payment are given below.`;
 
     document.getElementById("qpTransportTerms").innerText = data.transport_terms || "With Transport";
     document.getElementById("qpWeighingTerms").innerText = data.weighing_terms || "Unload Point Scale Qty";
