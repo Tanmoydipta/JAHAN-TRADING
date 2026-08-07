@@ -76,7 +76,21 @@ def _get_drive_service():
     creds = Credentials.from_authorized_user_file(load_path, SCOPES)
     if not creds.valid:
         if creds.expired and creds.refresh_token:
-            creds.refresh(Request())
+            from google.auth.exceptions import RefreshError
+            try:
+                creds.refresh(Request())
+            except RefreshError:
+                # The saved refresh_token itself is no longer valid (revoked
+                # from Google Account security settings, unused too long, or
+                # too many tokens issued for this OAuth client) — refreshing
+                # raises invalid_grant here rather than just leaving creds
+                # invalid, so this needs its own re-authorize message.
+                raise ValueError(
+                    "Google Drive authorization has expired or was revoked — run "
+                    "'python authorize_google_drive.py' again to re-authorize, then "
+                    "update the drive_token.json Secret File on Render with the new "
+                    "token. See GOOGLE_DRIVE_SETUP.md."
+                )
             try:
                 with open(token_path, 'w', encoding='utf-8') as f:
                     f.write(creds.to_json())
