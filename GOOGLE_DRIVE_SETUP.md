@@ -119,10 +119,21 @@ ongoing upload access without needing to sign in again).
 
 - **"Google Drive isn't authorized yet"** — run `python authorize_google_drive.py`
   (Step 6).
-- **"Google Drive authorization has expired or was revoked"** — run
-  `python authorize_google_drive.py` again. This can happen if you revoke
+- **"Google Drive authorization has expired or was revoked"** (`invalid_grant:
+  Token has been expired or revoked`) — run `python authorize_google_drive.py`
+  again to get a working token immediately. This can happen if you revoke
   access from your Google Account's security settings, or if the token file
-  is deleted/moved.
+  is deleted/moved — but if it keeps recurring every week or so, the real
+  cause is almost certainly that the OAuth consent screen is still in
+  **Testing** publish status: Google caps refresh tokens issued to test
+  users at **7 days**, so re-authorizing only buys another week. **Permanent
+  fix**: Google Cloud Console → APIs & Services → OAuth consent screen →
+  **Publish App**, moving it from Testing to **In production**. Since this
+  app only requests the non-sensitive `drive.file` scope, publishing does
+  not trigger Google's verification review — it's a one-click change with
+  no waiting period. Once published, tokens no longer expire on that 7-day
+  clock (they can still eventually need re-auth if unused for 6+ months or
+  manually revoked, just not on a weekly cycle).
 - **"Google Drive folder is not configured"** — `challans_folder_id` is
   blank in `config.json`.
 - **"Service Accounts do not have storage quota" / 403 storageQuotaExceeded**
