@@ -434,7 +434,7 @@ async function deleteUser(userId) {
 // rendered inside the repeatable line-item rows instead of the normal
 // one-per-form loop.
 const MULTI_ITEM_FIELDS = {
-  new_sale: ['product_type', 'size', 'cost_price', 'received_quantity', 'sale_unit_price'],
+  new_sale: ['product_type', 'size', 'cost_price', 'received_quantity', 'sale_unit_price', 'unloading_cost_per_unit'],
   new_purchase: ['product_type', 'size', 'unit_price', 'quantity'],
   new_quotation: ['product_type', 'size', 'origin', 'unit_price', 'quantity']
 };
@@ -982,7 +982,13 @@ function buildLineItemRow(entryId, idx) {
       inPrice.oninput = () => recalcLineItemTotals(entryId);
       gPrice.appendChild(inPrice);
 
-      row.appendChild(gProduct); row.appendChild(gSize); row.appendChild(gCost); row.appendChild(gQty); row.appendChild(gPrice);
+      const gUnload = mkGroup(2, "Unload Cost/Unit");
+      const inUnload = document.createElement("input");
+      inUnload.type = "number"; inUnload.step = "any"; inUnload.className = "form-control"; inUnload.id = `li_unloading_cost_per_unit_${idx}`; inUnload.value = 0;
+      inUnload.oninput = () => recalcLineItemTotals(entryId);
+      gUnload.appendChild(inUnload);
+
+      row.appendChild(gProduct); row.appendChild(gSize); row.appendChild(gCost); row.appendChild(gQty); row.appendChild(gPrice); row.appendChild(gUnload);
     } else {
       const gQty = mkGroup(3, "Quantity *");
       const inQty = document.createElement("input");
@@ -1046,7 +1052,13 @@ function buildLineItemRow(entryId, idx) {
     inPrice.oninput = () => recalcLineItemTotals(entryId);
     gPrice.appendChild(inPrice);
 
-    row.appendChild(gProduct); row.appendChild(gSize); row.appendChild(gCost); row.appendChild(gQty); row.appendChild(gPrice);
+    const gUnload = mkGroup(2, "Unload Cost/Unit");
+    const inUnload = document.createElement("input");
+    inUnload.type = "number"; inUnload.step = "any"; inUnload.className = "form-control"; inUnload.id = `li_unloading_cost_per_unit_${idx}`; inUnload.value = 0;
+    inUnload.oninput = () => recalcLineItemTotals(entryId);
+    gUnload.appendChild(inUnload);
+
+    row.appendChild(gProduct); row.appendChild(gSize); row.appendChild(gCost); row.appendChild(gQty); row.appendChild(gPrice); row.appendChild(gUnload);
   } else if (entryId === "new_quotation") {
     const gProduct = mkGroup(3, `Product #${idx + 1} Type *`);
     const selProduct = document.createElement("select");
@@ -1144,7 +1156,10 @@ function buildLineItemRow(entryId, idx) {
   }
 
   const gSubtotal = mkGroup(12, "");
-  gSubtotal.innerHTML = `<div style="text-align:right; font-size:12px; color:var(--text-muted);">Line Subtotal: <strong id="li_subtotal_${idx}" style="color:var(--accent-emerald);">BDT 0.00</strong></div>`;
+  const unloadSpan = entryId === "new_sale"
+    ? ` &nbsp;|&nbsp; Unloading Cost: <strong id="li_unload_cost_${idx}" style="color:var(--accent-emerald);">BDT 0.00</strong>`
+    : "";
+  gSubtotal.innerHTML = `<div style="text-align:right; font-size:12px; color:var(--text-muted);">Line Subtotal: <strong id="li_subtotal_${idx}" style="color:var(--accent-emerald);">BDT 0.00</strong>${unloadSpan}</div>`;
   row.appendChild(gSubtotal);
 
   return row;
@@ -1206,6 +1221,7 @@ async function loadRecordForModify(entryId, referenceNo) {
         setVal(`li_cost_price_${idx}`, item.cost_price);
         setVal(`li_received_quantity_${idx}`, item.received_quantity);
         setVal(`li_sale_unit_price_${idx}`, item.sale_unit_price);
+        setVal(`li_unloading_cost_per_unit_${idx}`, item.unloading_cost_per_unit);
       } else {
         setVal(`li_quantity_${idx}`, item.quantity);
         setVal(`li_unit_price_${idx}`, item.unit_price);
@@ -1280,6 +1296,13 @@ function recalcLineItemTotals(entryId) {
     grand += subtotal;
     const subtotalEl = document.getElementById(`li_subtotal_${idx}`);
     if (subtotalEl) subtotalEl.innerText = `BDT ${subtotal.toFixed(2)}`;
+
+    if (entryId === "new_sale") {
+      const unloadRate = parseFloat(document.getElementById(`li_unloading_cost_per_unit_${idx}`)?.value || 0);
+      const unloadCost = qty * unloadRate;
+      const unloadEl = document.getElementById(`li_unload_cost_${idx}`);
+      if (unloadEl) unloadEl.innerText = `BDT ${unloadCost.toFixed(2)}`;
+    }
   });
 
   const adv = parseFloat(document.getElementById("input_advance")?.value || 0);
@@ -1352,7 +1375,8 @@ function collectLineItems(entryId) {
         size: document.getElementById(`li_size_${idx}`)?.value || "",
         cost_price: document.getElementById(`li_cost_price_${idx}`)?.value || 0,
         received_quantity: document.getElementById(`li_received_quantity_${idx}`)?.value || 0,
-        sale_unit_price: document.getElementById(`li_sale_unit_price_${idx}`)?.value || 0
+        sale_unit_price: document.getElementById(`li_sale_unit_price_${idx}`)?.value || 0,
+        unloading_cost_per_unit: document.getElementById(`li_unloading_cost_per_unit_${idx}`)?.value || 0
       });
     } else if (entryId === "new_quotation") {
       items.push({

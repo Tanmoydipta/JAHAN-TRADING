@@ -862,7 +862,7 @@ def _validate_linked_customers(cursor, mode, client_id, entry_def, data):
 # can skip them (they're validated per row by the caller, not as a single
 # shared value).
 MULTI_LINE_ITEM_FIELDS = {
-    'sales': {'product_type', 'size', 'cost_price', 'received_quantity', 'sale_unit_price'},
+    'sales': {'product_type', 'size', 'cost_price', 'received_quantity', 'sale_unit_price', 'unloading_cost_per_unit'},
     'purchases': {'product_type', 'size', 'unit_price', 'quantity'},
     'quotations': {'product_type', 'size', 'origin', 'unit_price', 'quantity'},
 }
@@ -961,6 +961,9 @@ def save_entry(entry_id, data, client_id=None, created_by=None):
             qty = float(insert_data.get('received_quantity') or 0)
             price = float(insert_data.get('sale_unit_price') or 0)
             insert_data['sale_total_price'] = round(qty * price, 2)
+
+            unload_rate = float(insert_data.get('unloading_cost_per_unit') or 0)
+            insert_data['unloading_cost'] = round(qty * unload_rate, 2)
 
             # Pull cost price from inventory if not provided
             provided_cost = insert_data.get('cost_price')
@@ -1156,8 +1159,11 @@ def save_multi_item_entry(entry_id, shared_data, line_items, client_id=None, cre
                         cursor, mode, client_id, li.get('product_type'), li.get('size'))
                 else:
                     cost = float(provided_cost)
+                unload_rate = float(li.get('unloading_cost_per_unit') or 0)
+                unloading_cost = round(qty * unload_rate, 2)
                 prepared.append({**li, 'received_quantity': qty, 'sale_unit_price': price,
-                                  'sale_total_price': line_total, 'cost_price': cost})
+                                  'sale_total_price': line_total, 'cost_price': cost,
+                                  'unloading_cost_per_unit': unload_rate, 'unloading_cost': unloading_cost})
             else:
                 qty = float(li.get('quantity') or 0)
                 price = float(li.get('unit_price') or 0)
@@ -1426,8 +1432,11 @@ def update_multi_item_entry(entry_id, original_ref, shared_data, line_items, cli
                         cursor, mode, client_id, li.get('product_type'), li.get('size'))
                 else:
                     cost = float(provided_cost)
+                unload_rate = float(li.get('unloading_cost_per_unit') or 0)
+                unloading_cost = round(qty * unload_rate, 2)
                 prepared.append({**li, 'received_quantity': qty, 'sale_unit_price': price,
-                                  'sale_total_price': line_total, 'cost_price': cost})
+                                  'sale_total_price': line_total, 'cost_price': cost,
+                                  'unloading_cost_per_unit': unload_rate, 'unloading_cost': unloading_cost})
             else:
                 qty = float(li.get('quantity') or 0)
                 price = float(li.get('unit_price') or 0)
@@ -2005,19 +2014,22 @@ def execute_report(report_id, client_id=None, date_from=None, date_to=None,
     if txn_type and report_def.get('supports_txn_type_filter') and txn_type != 'All':
         if txn_type == 'Sales':
             sql = ("SELECT buyer_name as customer, SUM(sale_total_price) as total_amount, "
-                   "SUM(advance) as total_advance, SUM(due) as total_due "
+                   "SUM(advance) as total_advance, SUM(due) as sales_receivable, "
+                   "0 as purchase_payable, 0 as transport_payable, SUM(due) as total_due "
                    "FROM sales WHERE client_id = :client_id AND status = 'authorized' {rm_sales} "
                    "{date_filter} GROUP BY buyer_name ORDER BY total_due DESC")
             date_col = 'sale_date'
         elif txn_type == 'Purchase':
             sql = ("SELECT supplier_name as customer, SUM(total) as total_amount, "
-                   "SUM(advance) as total_advance, SUM(due) as total_due "
+                   "SUM(advance) as total_advance, 0 as sales_receivable, "
+                   "SUM(due) as purchase_payable, 0 as transport_payable, SUM(due) as total_due "
                    "FROM purchases WHERE client_id = :client_id AND status = 'authorized' {rm_purchases} "
                    "{date_filter} GROUP BY supplier_name ORDER BY total_due DESC")
             date_col = 'purchase_date'
         elif txn_type == 'Transport':
             sql = ("SELECT transporter_name as customer, SUM(rent) as total_amount, "
-                   "SUM(advance) as total_advance, SUM(due) as total_due "
+                   "SUM(advance) as total_advance, 0 as sales_receivable, "
+                   "0 as purchase_payable, SUM(due) as transport_payable, SUM(due) as total_due "
                    "FROM transporters WHERE client_id = :client_id {rm_transport} "
                    "{date_filter} GROUP BY transporter_name ORDER BY total_due DESC")
             date_col = 'entry_date'

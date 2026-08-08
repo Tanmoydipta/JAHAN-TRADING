@@ -18,7 +18,7 @@ Flask + vanilla JS ERP system for a trading/inventory business. Config-driven sc
 - `customers` — id, client_id, customer_name, customer_type, contact_number, **address**
 - `transporters` — id, client_id, entry_date, transporter_name, truck_no, movement_type, reference_no, quantity, **from_location**, **to_location**, **unit_rate_per_ton**, rent, advance, due, **address**
 - `purchases` — id, client_id, input_invoice_no, purchase_date, supplier_name, mobile_number, product_type, size, unit_price, quantity, total, transporter_name, truck_no, loading_location, **unloading_location**, advance, due, **record_source** (`'New'`/`'Previous'`, default `'New'`), **address**
-- `sales` — id, client_id, chalan_no, sale_date, buyer_name, contact_number, product_type, size, received_quantity, cost_price, sale_unit_price, sale_total_price, po_order, transporter_name, truck_no, **loading_location**, unloading_location, advance, due, **record_source** (`'New'`/`'Previous'`, default `'New'`), **address**
+- `sales` — id, client_id, chalan_no, sale_date, buyer_name, contact_number, product_type, size, received_quantity, cost_price, sale_unit_price, sale_total_price, po_order, transporter_name, truck_no, **loading_location**, unloading_location, advance, due, **record_source** (`'New'`/`'Previous'`, default `'New'`), **address**, **unloading_cost_per_unit**, **unloading_cost**
 - `quotations` — id, client_id, quotation_no, quotation_date, customer_name, product_type, size, origin, unit_price, quantity, total, status (`pending`/`approved`), created_by, authorized_by, authorized_at, **address**, **project_location**
 - `challan_uploads` — id, client_id, chalan_no, file_name, drive_file_id, drive_view_url, uploaded_by, uploaded_at (one row per chalan_no — see Google Drive section)
 
@@ -100,17 +100,16 @@ COALESCE((SELECT SUM(rent) FROM transporters
 ```
 This works in both SQLite and MySQL.
 
-### customer_dues_report txn_type dispatch
+### customer_dues_report: three-way due split (Sales Receivable / Purchase Payable / Transport Payable)
 
-When `txn_type` ≠ `All`, `execute_report()` in `database.py` builds a per-type SQL query at runtime (not from config):
-- `Sales` → aggregates from `sales` table, grouped by `buyer_name`
-- `Purchase` → aggregates from `purchases` table, grouped by `supplier_name`
-- `Transport` → aggregates from `transporters` table, grouped by `transporter_name`
+`customer_dues_report`'s "Total Due" column was split into three, since a due balance owed *to* a customer (Sales Receivable) is a fundamentally different number from a due balance the business owes *out* (Purchase/Transport Payable), and lumping them together obscured which was which. The default ("All") query tags each UNION branch with a `role` literal (`'sales'`/`'purchase'`/`'transport'`) and uses conditional aggregation (`SUM(CASE WHEN role = 'sales' THEN due ELSE 0 END) as sales_receivable`, etc.) to produce `sales_receivable`, `purchase_payable`, `transport_payable`, and an overall `total_due` — 7 columns total (`Customer`, `Total Amount`, `Total Advance`, `Sales Receivable`, `Purchase Payable`, `Transport Payable`, `Total Due`). `summary_column` stays `total_due` (the grand total across all three).
+
+When `txn_type` ≠ `All`, `execute_report()` in `database.py` builds a per-type SQL query at runtime (not from config) — `Sales`/`Purchase`/`Transport` each aggregate from just that one table (grouped by `buyer_name`/`supplier_name`/`transporter_name` respectively). **These per-type queries must select the same 7-column shape as the "All" query** (with the two inapplicable buckets hardcoded to `0`), even though only one bucket is ever non-zero — the frontend renders headers from `report_def['columns']` (always the full 7) but data cells from the query's own `db_keys`, so a column-count mismatch between the two would silently misalign every row.
 
 ### Multi-item entries (Sales / Purchase)
 
 Sales and Purchase entry forms now support multiple product line items in a single transaction (one chalan_no or input_invoice_no shared across all rows). Frontend (`app.js`):
-- `MULTI_ITEM_FIELDS` maps `new_sale` → [product_type, size, cost_price, received_quantity, sale_unit_price] and `new_purchase` → [product_type, size, quantity, unit_price]
+- `MULTI_ITEM_FIELDS` maps `new_sale` → [product_type, size, cost_price, received_quantity, sale_unit_price, unloading_cost_per_unit] and `new_purchase` → [product_type, size, quantity, unit_price]
 - User sets a "Number of Products" count; `renderLineItemRows()` renders N rows with row-level inputs + live subtotal per row
 - `recalcLineItemTotals()` computes grand total + grand advance + grand due across all rows
 - `collectLineItems()` gathers all line-item data; `handleFormSubmit()` detects multi-item mode and calls `/api/entry/<entry_id>/multi` instead of `/api/entry/<entry_id>`
@@ -124,6 +123,13 @@ Backend (`database.py → save_multi_item_entry()`):
 Invoice rendering (`get_invoice_data()` / `openInvoiceModal()`):
 - Returns all rows sharing a chalan_no as `data.items` (single-product sales unaffected — items is just length 1)
 - Invoice modal renders one table row per product and sums subtotal/advance/due/grand across them
+
+### Unloading cost (Sales line items)
+
+Each Sales line item has an **Unloading Cost per Unit** (`unloading_cost_per_unit`, optional, default 0) — a per-unit cost the client incurs unloading that product, distinct from `unloading_location` (a place name) and from transporter rent (a separate cost tracked on the `transporters` table). **Unloading Cost** (`unloading_cost` — the stored total) is always `received_quantity * unloading_cost_per_unit`, computed authoritatively server-side (same "never trust a client-submitted total" pattern as `sale_total_price`) in `save_entry()`, `save_multi_item_entry()`, and `update_multi_item_entry()` (Modify mode) — all three sales code paths compute it independently since each builds its own row data.
+- Frontend (`app.js → buildLineItemRow()`): both `new_sale` rendering branches (manual/Previous/Modify combo, inventory-linked select) get an extra "Unload Cost/Unit" input (`li_unloading_cost_per_unit_${idx}`) after Sale Price, wired to `recalcLineItemTotals()` on input like the other line-item fields.
+- `recalcLineItemTotals()` computes and displays a live per-row "Unloading Cost" total (`li_unload_cost_${idx}`) next to the existing "Line Subtotal" — this is a **display-only** live preview; it does not feed into the row's Subtotal/grand total/due (unloading cost isn't part of what the customer owes, it's an internal cost that only affects profit, same treatment as `cost_price`/COGS).
+- `sales_report` shows both `Unload Cost/Unit` and `Unload Cost` (total) columns. `profit_report`'s `net_profit` now subtracts `unloading_cost` alongside COGS and transport cost: `sale_total_price - (qty * cost_price) - unloading_cost - transport_cost`.
 
 ### Line-item mandatory field validation (Sales / Purchase / Quotation)
 
@@ -300,7 +306,7 @@ A single Sales or Purchase transaction can now include multiple product line ite
 
 ## Schema migration pattern
 
-New columns are added to live DBs automatically via `_migrate_missing_columns()` in `database.py` — it runs `ALTER TABLE ... ADD COLUMN` for any column in `config.json → tables` that is missing from the live schema. No manual DB migration is ever needed; just add the column to config and restart. Columns added in the last major sessions: `unloading_location` (purchases), `loading_location` (sales), `from_location`/`to_location` (transporters), `origin` (products), `record_source` (sales, purchases), `unit_rate_per_ton` (transporters), `project_location` (quotations). The `letterhead_settings` table (not config-driven — see below) gets its own small ad-hoc migration in `_ensure_letterhead_table()` for the same reason (`footer_height_px` added this session).
+New columns are added to live DBs automatically via `_migrate_missing_columns()` in `database.py` — it runs `ALTER TABLE ... ADD COLUMN` for any column in `config.json → tables` that is missing from the live schema. No manual DB migration is ever needed; just add the column to config and restart. Columns added in the last major sessions: `unloading_location` (purchases), `loading_location` (sales), `from_location`/`to_location` (transporters), `origin` (products), `record_source` (sales, purchases), `unit_rate_per_ton` (transporters), `project_location` (quotations), `unloading_cost_per_unit`/`unloading_cost` (sales). The `letterhead_settings` table (not config-driven — see below) gets its own small ad-hoc migration in `_ensure_letterhead_table()` for the same reason (`footer_height_px` added this session).
 
 ## Full session history
 
