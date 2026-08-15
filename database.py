@@ -1910,6 +1910,281 @@ def adjust_entry(table_name, record_id, requested_by, payment_due_date=None,
         conn.close()
 
 
+# ---------------- CUSTOMER PAYMENTS / RECEIPTS ----------------
+# A direct payment-in (Sales — money received from a buyer) or payment-out
+# (Purchase/Transport — money paid to a supplier/transporter), applied
+# against one or more of that party's existing outstanding bills. Recorded
+# as its own auditable record (payments + payment_allocations) rather than
+# just mutating advance/due in place, so it shows up in its own ledger and
+# can be edited/deleted later — unlike the older Adjust button, which
+# changes advance/due with no separate trace of the adjustment itself.
+PAYMENT_TXN_TABLES = {
+    'Sales': {'table': 'sales', 'ref_col': 'chalan_no', 'name_col': 'buyer_name',
+              'total_col': 'sale_total_price', 'date_col': 'sale_date'},
+    'Purchase': {'table': 'purchases', 'ref_col': 'input_invoice_no', 'name_col': 'supplier_name',
+                 'total_col': 'total', 'date_col': 'purchase_date'},
+    'Transport': {'table': 'transporters', 'ref_col': 'reference_no', 'name_col': 'transporter_name',
+                  'total_col': 'rent', 'date_col': 'entry_date'},
+}
+
+
+def list_customers_with_dues(txn_type, client_id):
+    """Distinct customer/supplier/transporter names that currently have an
+    outstanding due for this transaction type — feeds the Payment/Receipt
+    entry form's Customer dropdown, scoped to whichever Transaction Type is
+    selected first."""
+    spec = PAYMENT_TXN_TABLES.get(txn_type)
+    if not spec:
+        raise ValueError("txn_type must be one of Sales, Purchase, Transport")
+    conn, mode = get_db_connection()
+    cursor = conn.cursor()
+    ph = _ph(mode)
+    status_clause = " AND status = 'authorized'" if spec['table'] in ('sales', 'purchases') else ""
+    cursor.execute(
+        f"SELECT {spec['name_col']} as name FROM {spec['table']} "
+        f"WHERE client_id = {ph}{status_clause} GROUP BY {spec['name_col']} HAVING SUM(due) > 0 "
+        f"ORDER BY {spec['name_col']} ASC",
+        (client_id,)
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return [(r[0] if mode == 'sqlite' else r['name']) for r in rows if (r[0] if mode == 'sqlite' else r['name'])]
+
+
+def list_customer_dues(txn_type, customer_name, client_id):
+    """Outstanding bills for one party under one transaction type, grouped
+    by reference number so a multi-item transaction (several DB rows
+    sharing one chalan_no/input_invoice_no) appears as a single bill with
+    its true invoice-level total/advance/due — feeds the Payment/Receipt
+    entry form's due-bill picker."""
+    spec = PAYMENT_TXN_TABLES.get(txn_type)
+    if not spec:
+        raise ValueError("txn_type must be one of Sales, Purchase, Transport")
+    conn, mode = get_db_connection()
+    cursor = conn.cursor()
+    ph = _ph(mode)
+    status_clause = " AND status = 'authorized'" if spec['table'] in ('sales', 'purchases') else ""
+    cursor.execute(
+        f"SELECT {spec['ref_col']} as reference_no, MAX({spec['date_col']}) as txn_date, "
+        f"SUM({spec['total_col']}) as total, SUM(advance) as advance, SUM(due) as due "
+        f"FROM {spec['table']} WHERE client_id = {ph} AND {spec['name_col']} = {ph}{status_clause} "
+        f"GROUP BY {spec['ref_col']} HAVING SUM(due) > 0 ORDER BY MAX(id) DESC",
+        (client_id, customer_name)
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def _apply_payment_delta(cursor, mode, client_id, table_name, ref_col, total_col, reference_no, delta_amount):
+    """Add (positive, applying a payment) or subtract (negative, reversing
+    one) delta_amount to/from the advance of whichever row currently carries
+    the due for this reference number — mirrors the "first row of a
+    multi-item group holds the whole invoice's advance/due" invariant used
+    everywhere else in this codebase (see save_multi_item_entry), so due is
+    recomputed against the invoice's TRUE grand total (summed across every
+    row sharing the reference), not just one line item's own total."""
+    ph = _ph(mode)
+    cursor.execute(
+        f"SELECT id, {total_col} as amt, advance FROM {table_name} "
+        f"WHERE {ref_col} = {ph} AND client_id = {ph} ORDER BY id ASC",
+        (reference_no, client_id)
+    )
+    rows = cursor.fetchall()
+    if not rows:
+        raise ValueError(f"No {table_name} record found for reference '{reference_no}'")
+    rows = [dict(r) for r in rows] if mode == 'sqlite' else list(rows)
+    grand_total = sum(float(r['amt'] or 0) for r in rows)
+    first = rows[0]
+    old_advance = float(first['advance'] or 0)
+    new_advance = round(old_advance + delta_amount, 2)
+    new_due = round(max(0.0, grand_total - new_advance), 2)
+    cursor.execute(
+        f"UPDATE {table_name} SET advance = {ph}, due = {ph} WHERE id = {ph}",
+        (new_advance, new_due, first['id'])
+    )
+
+
+def _validate_payment_input(shared_data, allocations):
+    txn_type = str(shared_data.get('txn_type') or '').strip()
+    spec = PAYMENT_TXN_TABLES.get(txn_type)
+    if not spec:
+        raise ValueError("Transaction Type must be one of Sales, Purchase, Transport")
+    customer_name = str(shared_data.get('customer_name') or '').strip()
+    if not customer_name:
+        raise ValueError("Customer is required")
+    payment_date = shared_data.get('payment_date')
+    if not payment_date:
+        raise ValueError("Payment Date is required")
+    clean_allocations = []
+    for a in (allocations or []):
+        ref = str(a.get('reference_no') or '').strip()
+        try:
+            amt = float(a.get('amount') or 0)
+        except (TypeError, ValueError):
+            amt = 0
+        if ref and amt > 0:
+            clean_allocations.append({'reference_no': ref, 'amount': round(amt, 2)})
+    if not clean_allocations:
+        raise ValueError("Select at least one bill and enter an amount greater than 0")
+    return txn_type, spec, customer_name, payment_date, clean_allocations
+
+
+def _insert_payment_and_allocations(cursor, mode, ph, client_id, txn_type, spec, customer_name,
+                                     payment_date, notes, clean_allocations, total_amount, created_by):
+    now = datetime.now().isoformat(timespec='seconds')
+    cursor.execute(
+        f"INSERT INTO payments (client_id, payment_date, txn_type, customer_name, total_amount, notes, created_by, created_at) "
+        f"VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})",
+        (client_id, payment_date, txn_type, customer_name, total_amount, notes, created_by, now)
+    )
+    payment_id = cursor.lastrowid
+    for a in clean_allocations:
+        _apply_payment_delta(cursor, mode, client_id, spec['table'], spec['ref_col'],
+                              spec['total_col'], a['reference_no'], a['amount'])
+        cursor.execute(
+            f"INSERT INTO payment_allocations (client_id, payment_id, table_name, reference_no, allocated_amount) "
+            f"VALUES ({ph}, {ph}, {ph}, {ph}, {ph})",
+            (client_id, payment_id, spec['table'], a['reference_no'], a['amount'])
+        )
+    return payment_id
+
+
+def save_payment(shared_data, allocations, client_id=None, created_by=None):
+    """Records a payment/receipt and applies it against one or more of the
+    party's selected outstanding bills. allocations: [{"reference_no": ...,
+    "amount": ...}, ...] — one entry per bill the operator chose to pay."""
+    config = load_config()
+    if not client_id:
+        client_id = config['system'].get('default_client_id', 'CLI-001')
+    txn_type, spec, customer_name, payment_date, clean_allocations = _validate_payment_input(shared_data, allocations)
+    total_amount = round(sum(a['amount'] for a in clean_allocations), 2)
+
+    conn, mode = get_db_connection()
+    cursor = conn.cursor()
+    ph = _ph(mode)
+    try:
+        payment_id = _insert_payment_and_allocations(
+            cursor, mode, ph, client_id, txn_type, spec, customer_name,
+            payment_date, shared_data.get('notes'), clean_allocations, total_amount, created_by
+        )
+        if mode == 'sqlite':
+            conn.commit()
+        return {"status": "success", "id": payment_id, "total_amount": total_amount}
+    finally:
+        conn.close()
+
+
+def get_payment_detail(payment_id, client_id=None):
+    config = load_config()
+    if not client_id:
+        client_id = config['system'].get('default_client_id', 'CLI-001')
+    conn, mode = get_db_connection()
+    cursor = conn.cursor()
+    ph = _ph(mode)
+    cursor.execute(f"SELECT * FROM payments WHERE id = {ph} AND client_id = {ph}", (payment_id, client_id))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return None
+    payment = dict(row)
+    cursor.execute(
+        f"SELECT reference_no, allocated_amount FROM payment_allocations "
+        f"WHERE payment_id = {ph} AND client_id = {ph} ORDER BY id ASC",
+        (payment_id, client_id)
+    )
+    allocs = cursor.fetchall()
+    conn.close()
+    payment['allocations'] = [dict(a) for a in allocs]
+    return payment
+
+
+def _reverse_payment(cursor, mode, client_id, payment_id):
+    """Undoes a payment's effect on every bill it was allocated against,
+    then deletes the payment + its allocation rows. Shared by update and
+    delete — update is simply reverse-old, then re-save as new."""
+    ph = _ph(mode)
+    cursor.execute(
+        f"SELECT table_name, reference_no, allocated_amount FROM payment_allocations "
+        f"WHERE payment_id = {ph} AND client_id = {ph}",
+        (payment_id, client_id)
+    )
+    allocs = cursor.fetchall()
+    allocs = [dict(a) for a in allocs] if mode == 'sqlite' else list(allocs)
+    ref_col_by_table = {'sales': 'chalan_no', 'purchases': 'input_invoice_no', 'transporters': 'reference_no'}
+    total_col_by_table = {'sales': 'sale_total_price', 'purchases': 'total', 'transporters': 'rent'}
+    for a in allocs:
+        table_name = a['table_name']
+        _apply_payment_delta(cursor, mode, client_id, table_name, ref_col_by_table[table_name],
+                              total_col_by_table[table_name], a['reference_no'], -float(a['allocated_amount'] or 0))
+    cursor.execute(f"DELETE FROM payment_allocations WHERE payment_id = {ph} AND client_id = {ph}", (payment_id, client_id))
+    cursor.execute(f"DELETE FROM payments WHERE id = {ph} AND client_id = {ph}", (payment_id, client_id))
+
+
+def update_payment(payment_id, shared_data, allocations, requested_by, client_id=None):
+    """Admin-only: reverse the old allocations' effect, then insert a fresh
+    payment with the edited data — mirrors update_multi_item_entry()'s
+    reverse-old/insert-new pattern. Validates the new data before touching
+    anything, so a rejected edit never leaves the old payment reversed with
+    nothing re-applied in its place."""
+    config = load_config()
+    if not client_id:
+        client_id = config['system'].get('default_client_id', 'CLI-001')
+    txn_type, spec, customer_name, payment_date, clean_allocations = _validate_payment_input(shared_data, allocations)
+    total_amount = round(sum(a['amount'] for a in clean_allocations), 2)
+
+    conn, mode = get_db_connection()
+    cursor = conn.cursor()
+    ph = _ph(mode)
+    try:
+        role = _lookup_user_role(cursor, mode, requested_by)
+        if role != 'admin':
+            raise ValueError("Only an admin can modify a payment")
+
+        cursor.execute(f"SELECT id FROM payments WHERE id = {ph} AND client_id = {ph}", (payment_id, client_id))
+        if not cursor.fetchone():
+            raise ValueError("Payment not found")
+
+        _reverse_payment(cursor, mode, client_id, payment_id)
+        new_payment_id = _insert_payment_and_allocations(
+            cursor, mode, ph, client_id, txn_type, spec, customer_name,
+            payment_date, shared_data.get('notes'), clean_allocations, total_amount, requested_by
+        )
+        if mode == 'sqlite':
+            conn.commit()
+        return {"status": "success", "id": new_payment_id, "total_amount": total_amount}
+    finally:
+        conn.close()
+
+
+def delete_payment(payment_id, requested_by, client_id=None):
+    """Admin-only: reverses this payment's effect on every bill it touched,
+    then removes it — mirrors delete_entry()'s reversal pattern."""
+    config = load_config()
+    if not client_id:
+        client_id = config['system'].get('default_client_id', 'CLI-001')
+    conn, mode = get_db_connection()
+    cursor = conn.cursor()
+    ph = _ph(mode)
+    try:
+        role = _lookup_user_role(cursor, mode, requested_by)
+        if role != 'admin':
+            raise ValueError("Only an admin can delete a payment")
+
+        cursor.execute(f"SELECT id FROM payments WHERE id = {ph} AND client_id = {ph}", (payment_id, client_id))
+        if not cursor.fetchone():
+            raise ValueError("Payment not found")
+
+        _reverse_payment(cursor, mode, client_id, payment_id)
+
+        if mode == 'sqlite':
+            conn.commit()
+
+        return {"status": "success", "id": payment_id}
+    finally:
+        conn.close()
+
+
 def delete_user(user_id, requested_by):
     conn, mode = get_db_connection()
     cursor = conn.cursor()

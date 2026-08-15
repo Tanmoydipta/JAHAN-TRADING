@@ -18,7 +18,9 @@ from database import (
     create_session_token, verify_session_token, revoke_session_token,
     get_letterhead_settings, save_letterhead_settings,
     list_quotation_refs, get_quotation_data, approve_quotation,
-    save_challan_upload
+    save_challan_upload,
+    list_customers_with_dues, list_customer_dues, save_payment,
+    get_payment_detail, update_payment, delete_payment
 )
 from google_drive import upload_challan_to_drive, upload_letterhead_pad_image, download_file_from_drive
 
@@ -462,6 +464,95 @@ def api_report_po_options(report_id):
         date_to = request.args.get('to') or None
         return jsonify(list_report_po_options(report_id, client_id, customer=customer,
                                               date_from=date_from, date_to=date_to))
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+
+
+@app.route('/api/customers_with_dues', methods=['GET'])
+def api_customers_with_dues():
+    client_id = _scoped_client_id(request.args.get('client_id'))
+    if client_id is None:
+        return _forbidden()
+    txn_type = request.args.get('txn_type', '')
+    try:
+        return jsonify(list_customers_with_dues(txn_type, client_id))
+    except ValueError as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+
+
+@app.route('/api/customer_dues', methods=['GET'])
+def api_customer_dues():
+    client_id = _scoped_client_id(request.args.get('client_id'))
+    if client_id is None:
+        return _forbidden()
+    txn_type = request.args.get('txn_type', '')
+    customer = request.args.get('customer', '')
+    try:
+        return jsonify(list_customer_dues(txn_type, customer, client_id))
+    except ValueError as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+
+
+@app.route('/api/payment', methods=['POST'])
+def api_save_payment():
+    data = request.json or {}
+    client_id = _scoped_client_id(data.get('client_id'))
+    if client_id is None:
+        return _forbidden()
+    created_by = request.current_user['username']
+    shared = data.get('shared', {})
+    allocations = data.get('allocations', [])
+    try:
+        return jsonify(save_payment(shared, allocations, client_id=client_id, created_by=created_by))
+    except ValueError as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+
+
+@app.route('/api/payment/<int:payment_id>', methods=['GET'])
+def api_get_payment(payment_id):
+    client_id = _scoped_client_id(request.args.get('client_id'))
+    if client_id is None:
+        return _forbidden()
+    detail = get_payment_detail(payment_id, client_id=client_id)
+    if not detail:
+        return jsonify({"status": "error", "message": "Payment not found"}), 404
+    return jsonify(detail)
+
+
+@app.route('/api/payment/<int:payment_id>', methods=['PUT'])
+def api_update_payment(payment_id):
+    data = request.json or {}
+    client_id = _scoped_client_id(data.get('client_id'))
+    if client_id is None:
+        return _forbidden()
+    requested_by = request.current_user['username']
+    shared = data.get('shared', {})
+    allocations = data.get('allocations', [])
+    try:
+        return jsonify(update_payment(payment_id, shared, allocations, requested_by, client_id=client_id))
+    except ValueError as e:
+        return jsonify({"status": "error", "message": str(e)}), 403
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+
+
+@app.route('/api/payment/<int:payment_id>', methods=['DELETE'])
+def api_delete_payment(payment_id):
+    data = request.json or {}
+    client_id = _scoped_client_id(data.get('client_id'))
+    if client_id is None:
+        return _forbidden()
+    requested_by = request.current_user['username']
+    try:
+        return jsonify(delete_payment(payment_id, requested_by, client_id=client_id))
+    except ValueError as e:
+        return jsonify({"status": "error", "message": str(e)}), 403
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 400
 

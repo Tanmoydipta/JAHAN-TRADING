@@ -217,6 +217,7 @@ function switchEntryTab(entryId) {
   currentEntryId = entryId;
   currentRecordMode = "New";
   modifyTargetRef = null;
+  paymentEditId = null;
   document.querySelectorAll(".nav-item").forEach(el => el.classList.remove("active"));
   document.querySelector(`.nav-item[data-tab="entry-${entryId}"]`)?.classList.add("active");
   document.querySelectorAll(".tab-view").forEach(el => el.classList.remove("active"));
@@ -457,6 +458,11 @@ let currentRecordMode = "New";
 // whenever the mode changes or the tab is switched.
 let modifyTargetRef = null;
 
+// Set by the Payment/Receipt report's Edit button to load an existing
+// payment back into the entry form for editing; null means the form is
+// creating a brand new payment. Cleared on save/cancel/tab switch.
+let paymentEditId = null;
+
 // Widget choice only — Previous (never touches inventory) and Modify
 // (edits a real transaction's inventory effect server-side) both render
 // manual/catalog-linked fields instead of live stock-locked dropdowns,
@@ -527,6 +533,11 @@ async function renderEntryForm(entryId) {
   document.getElementById("pageSubtitle").innerText = `Enter details to store into table '${ep.table}'.`;
   document.getElementById("entryFormTitle").innerHTML = `<i class="fa-solid ${ep.icon || 'fa-pen'}"></i> ${ep.title}`;
   document.getElementById("entryFormTable").innerText = `Table: ${ep.table}`;
+
+  if (entryId === "new_payment") {
+    await renderPaymentEntryForm();
+    return;
+  }
 
   // Refresh lookups so dropdowns are current
   await refreshLookups();
@@ -1360,7 +1371,200 @@ function calculateTransporterTotal() {
   if (dueEl) dueEl.addEventListener("input", () => { dueEl._userTouched = true; }, { once: true });
 }
 
-function resetCurrentForm() { if (currentEntryId) renderEntryForm(currentEntryId); }
+function resetCurrentForm() {
+  paymentEditId = null;
+  if (currentEntryId) renderEntryForm(currentEntryId);
+}
+
+// ---------------- CUSTOMER PAYMENT / RECEIPT ----------------
+// Custom (non-config-driven) entry form: pick a Transaction Type, then a
+// customer who currently owes/is-owed money under that type, then the
+// outstanding bills for that customer load in with an editable "amount to
+// apply" per bill. Built entirely via DOM here (like the multi-item line
+// rows) rather than through the generic field-loop in renderEntryForm(),
+// since the due-bill list is fetched dynamically and isn't a fixed field.
+async function renderPaymentEntryForm() {
+  const container = document.getElementById("formFieldsContainer");
+  container.innerHTML = "";
+
+  const mkGroup = (span, labelHtml) => {
+    const g = document.createElement("div");
+    g.className = `form-group col-${span}`;
+    if (labelHtml) g.innerHTML = `<label>${labelHtml}</label>`;
+    return g;
+  };
+
+  const gDate = mkGroup(4, "Payment Date *");
+  const inDate = document.createElement("input");
+  inDate.type = "date"; inDate.className = "form-control"; inDate.id = "pmt_date"; inDate.required = true;
+  inDate.setAttribute("lang", "en-GB");
+  inDate.value = new Date().toISOString().split('T')[0];
+  gDate.appendChild(inDate);
+  container.appendChild(gDate);
+
+  const gType = mkGroup(4, "Transaction Type *");
+  const selType = document.createElement("select");
+  selType.className = "form-control"; selType.id = "pmt_txn_type"; selType.required = true;
+  selType.innerHTML = `<option value="">-- Select --</option>
+    <option value="Sales">Sales (money received from customer)</option>
+    <option value="Purchase">Purchase (money paid to supplier)</option>
+    <option value="Transport">Transport (money paid to transporter)</option>`;
+  selType.onchange = () => populatePaymentCustomers();
+  gType.appendChild(selType);
+  container.appendChild(gType);
+
+  const gCust = mkGroup(4, "Customer *");
+  const selCust = document.createElement("select");
+  selCust.className = "form-control"; selCust.id = "pmt_customer"; selCust.required = true;
+  selCust.innerHTML = `<option value="">-- Select Transaction Type First --</option>`;
+  selCust.onchange = () => loadPaymentDueBills();
+  gCust.appendChild(selCust);
+  container.appendChild(gCust);
+
+  const gNotes = mkGroup(12, "Notes");
+  const inNotes = document.createElement("input");
+  inNotes.type = "text"; inNotes.className = "form-control"; inNotes.id = "pmt_notes";
+  gNotes.appendChild(inNotes);
+  container.appendChild(gNotes);
+
+  const gBills = mkGroup(12, "Outstanding Bills");
+  const billsWrap = document.createElement("div");
+  billsWrap.id = "pmtBillsContainer";
+  billsWrap.style.cssText = "margin-top:8px; display:flex; flex-direction:column; gap:8px;";
+  billsWrap.innerHTML = `<div style="color:var(--text-muted); font-size:13px;">Select a Transaction Type and Customer to see outstanding bills.</div>`;
+  gBills.appendChild(billsWrap);
+  const totalLine = document.createElement("div");
+  totalLine.style.cssText = "text-align:right; margin-top:10px; font-size:14px;";
+  totalLine.innerHTML = `Total Payment Amount: <strong id="pmtTotalAmount" style="color:var(--accent-emerald);">BDT 0.00</strong>`;
+  gBills.appendChild(totalLine);
+  container.appendChild(gBills);
+
+  if (paymentEditId) {
+    await loadPaymentForEdit(paymentEditId);
+  }
+}
+
+async function populatePaymentCustomers() {
+  const type = document.getElementById("pmt_txn_type")?.value;
+  const selCust = document.getElementById("pmt_customer");
+  if (!selCust) return;
+  selCust.innerHTML = `<option value="">-- Select Customer --</option>`;
+  const billsWrap = document.getElementById("pmtBillsContainer");
+  if (billsWrap) billsWrap.innerHTML = `<div style="color:var(--text-muted); font-size:13px;">Select a customer to see outstanding bills.</div>`;
+  updatePaymentTotal();
+  if (!type) return;
+  try {
+    const r = await apiFetch(`/api/customers_with_dues?txn_type=${encodeURIComponent(type)}&client_id=${currentClientId}`);
+    const names = await r.json();
+    if (!names.length) {
+      selCust.innerHTML = `<option value="">-- No outstanding dues for this type --</option>`;
+      return;
+    }
+    names.forEach(name => {
+      const o = document.createElement("option");
+      o.value = name; o.innerText = name;
+      selCust.appendChild(o);
+    });
+  } catch (e) { /* ignore */ }
+}
+
+function buildPaymentBillRow(referenceNo, txnDate, total, advance, due, prefillAmount, displayLabel) {
+  const row = document.createElement("div");
+  row.className = "pmt-bill-row";
+  row.dataset.referenceNo = referenceNo;
+  row.style.cssText = "display:grid; grid-template-columns: 1.3fr 1fr 1fr 1fr 1.2fr; gap:10px; align-items:center; padding:8px 10px; background:rgba(255,255,255,0.03); border-radius:8px;";
+  const dateLine = txnDate ? `<br><span style="font-size:11px; color:var(--text-muted);">${txnDate}</span>` : "";
+  row.innerHTML = `
+    <div><strong>${displayLabel || referenceNo}</strong>${dateLine}</div>
+    <div>Total: BDT ${parseFloat(total || 0).toFixed(2)}</div>
+    <div>Advance: BDT ${parseFloat(advance || 0).toFixed(2)}</div>
+    <div style="color:var(--accent-rose);">Due: BDT ${parseFloat(due || 0).toFixed(2)}</div>
+    <input type="number" step="any" min="0" class="form-control pmt-bill-amount" placeholder="Amount to apply" value="${prefillAmount || 0}">
+  `;
+  row.querySelector(".pmt-bill-amount").oninput = () => updatePaymentTotal();
+  return row;
+}
+
+async function loadPaymentDueBills() {
+  const type = document.getElementById("pmt_txn_type")?.value;
+  const customer = document.getElementById("pmt_customer")?.value;
+  const billsWrap = document.getElementById("pmtBillsContainer");
+  if (!billsWrap) return;
+  billsWrap.innerHTML = "";
+  if (!type || !customer) {
+    billsWrap.innerHTML = `<div style="color:var(--text-muted); font-size:13px;">Select a customer to see outstanding bills.</div>`;
+    updatePaymentTotal();
+    return;
+  }
+  try {
+    const r = await apiFetch(`/api/customer_dues?txn_type=${encodeURIComponent(type)}&customer=${encodeURIComponent(customer)}&client_id=${currentClientId}`);
+    const bills = await r.json();
+    if (!bills.length) {
+      billsWrap.innerHTML = `<div style="color:var(--text-muted); font-size:13px;">No outstanding bills for this customer.</div>`;
+      updatePaymentTotal();
+      return;
+    }
+    bills.forEach(bill => {
+      billsWrap.appendChild(buildPaymentBillRow(bill.reference_no, bill.txn_date, bill.total, bill.advance, bill.due, 0));
+    });
+    updatePaymentTotal();
+  } catch (e) { /* ignore */ }
+}
+
+function updatePaymentTotal() {
+  let total = 0;
+  document.querySelectorAll(".pmt-bill-amount").forEach(inp => { total += parseFloat(inp.value || 0); });
+  const el = document.getElementById("pmtTotalAmount");
+  if (el) el.innerText = `BDT ${total.toFixed(2)}`;
+}
+
+// Loads an existing payment's data back into the form for editing. The
+// due-bill list only shows bills with due > 0 right now — a bill this same
+// payment already fully covered won't appear in it, so any allocation not
+// found among the freshly-loaded rows gets a synthetic row injected
+// instead (its "true" due, if this payment were reversed, would be its
+// current due plus this allocation, but showing that live recomputation
+// isn't essential here — the backend handles the reverse-then-reapply
+// correctly regardless of what the form displays).
+async function loadPaymentForEdit(paymentId) {
+  try {
+    const r = await apiFetch(`/api/payment/${paymentId}?client_id=${currentClientId}`);
+    const data = await r.json();
+    if (data.status === "error") { alert("Could not load payment: " + data.message); return; }
+
+    document.getElementById("pmt_date").value = data.payment_date;
+    document.getElementById("pmt_txn_type").value = data.txn_type;
+    document.getElementById("pmt_notes").value = data.notes || "";
+
+    await populatePaymentCustomers();
+    const custSel = document.getElementById("pmt_customer");
+    if (!Array.from(custSel.options).some(o => o.value === data.customer_name)) {
+      const o = document.createElement("option");
+      o.value = data.customer_name; o.innerText = data.customer_name;
+      custSel.appendChild(o);
+    }
+    custSel.value = data.customer_name;
+
+    await loadPaymentDueBills();
+
+    const billsWrap = document.getElementById("pmtBillsContainer");
+    (data.allocations || []).forEach(alloc => {
+      const existingRow = Array.from(billsWrap.querySelectorAll(".pmt-bill-row"))
+        .find(r => r.dataset.referenceNo === alloc.reference_no);
+      if (existingRow) {
+        existingRow.querySelector(".pmt-bill-amount").value = alloc.allocated_amount;
+      } else {
+        billsWrap.appendChild(buildPaymentBillRow(
+          alloc.reference_no, "", 0, 0, 0, alloc.allocated_amount,
+          `${alloc.reference_no} (fully covered by this payment)`
+        ));
+      }
+    });
+    updatePaymentTotal();
+  } catch (err) {
+    alert("Failed to load payment: " + err.message);
+  }
+}
 
 function collectLineItems(entryId) {
   const rowsContainer = document.getElementById("lineItemsContainer");
@@ -1467,6 +1671,49 @@ async function applyQuotationToSale(quotationNo) {
 async function handleFormSubmit(event) {
   event.preventDefault();
   if (!currentEntryId) return;
+
+  if (currentEntryId === "new_payment") {
+    const shared = {
+      payment_date: document.getElementById("pmt_date")?.value,
+      txn_type: document.getElementById("pmt_txn_type")?.value,
+      customer_name: document.getElementById("pmt_customer")?.value,
+      notes: document.getElementById("pmt_notes")?.value
+    };
+    if (!shared.payment_date || !shared.txn_type || !shared.customer_name) {
+      alert("Fill in Payment Date, Transaction Type, and Customer.");
+      return;
+    }
+    const allocations = [];
+    document.querySelectorAll(".pmt-bill-row").forEach(row => {
+      const amt = parseFloat(row.querySelector(".pmt-bill-amount")?.value || 0);
+      if (amt > 0) allocations.push({ reference_no: row.dataset.referenceNo, amount: amt });
+    });
+    if (allocations.length === 0) {
+      alert("Enter an amount greater than 0 for at least one bill.");
+      return;
+    }
+
+    const isEdit = !!paymentEditId;
+    const url = isEdit ? `/api/payment/${paymentEditId}` : `/api/payment`;
+    try {
+      const res = await apiFetch(url, {
+        method: isEdit ? "PUT" : "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ client_id: currentClientId, shared, allocations })
+      });
+      const data = await res.json();
+      if (data.status === "success") {
+        alert(isEdit ? "Payment updated successfully." : `Payment saved (BDT ${parseFloat(data.total_amount).toFixed(2)}).`);
+        paymentEditId = null;
+        resetCurrentForm();
+      } else {
+        alert("Error saving payment: " + data.message);
+      }
+    } catch (err) {
+      alert("Connection failure: " + err.message);
+    }
+    return;
+  }
 
   const form = document.getElementById("dynamicForm");
   const formData = new FormData(form);
@@ -1713,8 +1960,10 @@ async function loadReportData(reportId) {
     const canApproveQuotation = reportId === 'quotation_report' && currentUser && currentUser.role === 'admin';
     const canPrintQuotation = reportId === 'quotation_report';
     const canUploadChallan = reportId === 'sales_report';
+    const canEditPayment = reportId === 'payment_report' && currentUser && currentUser.role === 'admin';
+    const canDeletePayment = reportId === 'payment_report' && currentUser && currentUser.role === 'admin';
     const showActions = canDelete || canAdjust || canEdit || canDownloadInvoice ||
-      canApproveQuotation || canPrintQuotation || canUploadChallan;
+      canApproveQuotation || canPrintQuotation || canUploadChallan || canEditPayment || canDeletePayment;
 
     const NUM_COLS = new Set(["qty","quantity","unit price","total","advance","due","rent","cost","price","amount","transport cost","profit","revenue","stock valuation","cost price","sale price"]);
     const theadTr = document.getElementById("reportTableHead");
@@ -1780,6 +2029,12 @@ async function loadReportData(reportId) {
           }
           if (canDelete) {
             html += `<button class="btn btn-secondary" style="padding:4px 10px; font-size:11px; color:var(--accent-rose);" onclick="deleteReportRecord('${deleteTable}', ${row.id}, '${reportId}')"><i class="fa-solid fa-trash"></i> Delete</button>`;
+          }
+          if (canEditPayment) {
+            html += `<button class="btn btn-secondary" style="padding:4px 10px; font-size:11px; margin-right:6px;" onclick="editPaymentFromReport(${row.id})"><i class="fa-solid fa-pen-to-square"></i> Edit</button>`;
+          }
+          if (canDeletePayment) {
+            html += `<button class="btn btn-secondary" style="padding:4px 10px; font-size:11px; color:var(--accent-rose);" onclick="deletePaymentFromReport(${row.id})"><i class="fa-solid fa-trash"></i> Delete</button>`;
           }
           td.innerHTML = html;
           tr.appendChild(td);
@@ -2012,6 +2267,42 @@ async function submitEditRecord() {
       if (currentReportId) loadReportData(currentReportId);
     } else {
       alert("Update failed: " + data.message);
+    }
+  } catch (err) {
+    alert("Connection error: " + err.message);
+  }
+}
+
+// Mirrors switchEntryTab()'s tab-switching but deliberately skips its
+// paymentEditId reset (and awaits the render) so the edit target survives
+// into renderPaymentEntryForm() — calling switchEntryTab() itself here
+// would race its own un-awaited render against this one.
+async function editPaymentFromReport(paymentId) {
+  currentTab = "entry-form";
+  currentEntryId = "new_payment";
+  currentRecordMode = "New";
+  modifyTargetRef = null;
+  paymentEditId = paymentId;
+  document.querySelectorAll(".nav-item").forEach(el => el.classList.remove("active"));
+  document.querySelector('.nav-item[data-tab="entry-new_payment"]')?.classList.add("active");
+  document.querySelectorAll(".tab-view").forEach(el => el.classList.remove("active"));
+  document.getElementById("tab-entry-form").classList.add("active");
+  await renderEntryForm("new_payment");
+}
+
+async function deletePaymentFromReport(paymentId) {
+  if (!confirm("Delete this payment? The amount will be added back to the relevant bill's outstanding due.")) return;
+  try {
+    const res = await apiFetch(`/api/payment/${paymentId}`, {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ client_id: currentClientId })
+    });
+    const data = await res.json();
+    if (data.status === "success") {
+      loadReportData("payment_report");
+    } else {
+      alert("Delete failed: " + data.message);
     }
   } catch (err) {
     alert("Connection error: " + err.message);
