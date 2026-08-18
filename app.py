@@ -20,7 +20,8 @@ from database import (
     list_quotation_refs, get_quotation_data, approve_quotation,
     save_challan_upload,
     list_customers_with_dues, list_customer_dues, save_payment,
-    get_payment_detail, update_payment, delete_payment
+    get_payment_detail, update_payment, delete_payment,
+    get_available_credit
 )
 from google_drive import upload_challan_to_drive, upload_letterhead_pad_image, download_file_from_drive
 
@@ -493,6 +494,19 @@ def api_customer_dues():
         return jsonify(list_customer_dues(txn_type, customer, client_id))
     except ValueError as e:
         return jsonify({"status": "error", "message": str(e)}), 400
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+
+
+@app.route('/api/customer_credit', methods=['GET'])
+def api_customer_credit():
+    client_id = _scoped_client_id(request.args.get('client_id'))
+    if client_id is None:
+        return _forbidden()
+    txn_type = request.args.get('txn_type', '')
+    customer = request.args.get('customer', '')
+    try:
+        return jsonify({"available": get_available_credit(txn_type, customer, client_id)})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 400
 

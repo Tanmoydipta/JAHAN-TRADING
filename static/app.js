@@ -710,7 +710,9 @@ async function renderEntryForm(entryId) {
           o.innerText = `No ${f.customer_type_filter} customers yet — add one in Customer Registration first`;
           input.appendChild(o);
         }
-        if (f.fills_contact_field || f.fills_address_field) {
+        const isCreditField = (entryId === "new_sale" && f.name === "buyer_name") ||
+                               (entryId === "new_purchase" && f.name === "supplier_name");
+        if (f.fills_contact_field || f.fills_address_field || isCreditField) {
           input.onchange = () => {
             const opt = input.options[input.selectedIndex];
             if (f.fills_contact_field) {
@@ -721,6 +723,7 @@ async function renderEntryForm(entryId) {
               const addressEl = document.getElementById(`input_${f.fills_address_field}`);
               if (addressEl) addressEl.value = opt.dataset.address || "";
             }
+            if (isCreditField) updateAvailableCredit(entryId, opt.value);
           };
         }
       }
@@ -865,6 +868,29 @@ async function renderEntryForm(entryId) {
       const el = document.getElementById("input_chalan_no");
       if (el && !el.value) el.value = data.chalan_no;
     } catch (e) { /* ignore */ }
+  }
+
+  // Available credit (overpayment carry-forward from an earlier invoice
+  // for this same customer) — New mode only, mirrors the "credit" concept
+  // introduced by the Customer Payment feature but scoped to direct
+  // entry-time overpayment on Sales/Purchase.
+  if ((entryId === "new_sale" || entryId === "new_purchase") && currentRecordMode === "New") {
+    const wrap = document.createElement("div");
+    wrap.className = "form-group col-12";
+    wrap.id = "creditBoxWrap";
+    wrap.style.display = "none";
+    wrap.innerHTML = `
+      <div style="display:flex; align-items:center; gap:14px; padding:10px 14px; background:rgba(16,185,129,0.08); border:1px solid rgba(16,185,129,0.3); border-radius:8px;">
+        <span>Available Credit for this customer: <strong id="creditAvailableAmount" style="color:var(--accent-emerald);">BDT 0.00</strong></span>
+        <label style="margin-left:auto; display:flex; align-items:center; gap:6px; font-weight:400;">
+          Apply:
+          <input type="number" step="any" min="0" class="form-control" id="input_apply_credit" name="apply_credit" value="0" style="width:140px;">
+        </label>
+      </div>
+    `;
+    container.appendChild(wrap);
+    const applyInput = wrap.querySelector("#input_apply_credit");
+    applyInput.oninput = () => recalcLineItemTotals(entryId);
   }
 
   // Multi-product line items (sales/purchases only)
@@ -1317,11 +1343,18 @@ function recalcLineItemTotals(entryId) {
   });
 
   const adv = parseFloat(document.getElementById("input_advance")?.value || 0);
-  const due = Math.max(0, grand - adv);
+  const appliedCredit = parseFloat(document.getElementById("input_apply_credit")?.value || 0);
+  const effectiveAdvance = adv + appliedCredit;
+  const due = Math.max(0, grand - effectiveAdvance);
   const totalEl = document.getElementById("liveCalculatedTotal");
   const dueDisplayEl = document.getElementById("liveCalculatedDue");
   if (totalEl) totalEl.innerText = `BDT ${grand.toFixed(2)}`;
-  if (dueDisplayEl) dueDisplayEl.innerText = `BDT ${due.toFixed(2)}`;
+  if (dueDisplayEl) {
+    dueDisplayEl.innerText = `BDT ${due.toFixed(2)}`;
+    if (effectiveAdvance > grand) {
+      dueDisplayEl.innerText += ` (overpaid by BDT ${(effectiveAdvance - grand).toFixed(2)} — saved as credit)`;
+    }
+  }
   const dueEl = document.getElementById("input_due");
   if (dueEl && !dueEl._userTouched) dueEl.value = due.toFixed(2);
 }
@@ -1374,6 +1407,34 @@ function calculateTransporterTotal() {
 function resetCurrentForm() {
   paymentEditId = null;
   if (currentEntryId) renderEntryForm(currentEntryId);
+}
+
+// Fetches and displays a customer's available overpayment credit balance
+// (built up when a past invoice was paid/received for more than its own
+// total) on Sales/Purchase Entry, so the operator can apply it toward the
+// invoice currently being created — see the CUSTOMER CREDIT section in
+// database.py for how the balance itself is tracked.
+async function updateAvailableCredit(entryId, customerName) {
+  const wrap = document.getElementById("creditBoxWrap");
+  const amountEl = document.getElementById("creditAvailableAmount");
+  const applyInput = document.getElementById("input_apply_credit");
+  if (!wrap) return;
+  if (!customerName) {
+    wrap.style.display = "none";
+    if (applyInput) { applyInput.value = 0; applyInput.max = ""; }
+    recalcLineItemTotals(entryId);
+    return;
+  }
+  const txnType = entryId === "new_sale" ? "Sales" : "Purchase";
+  try {
+    const r = await apiFetch(`/api/customer_credit?txn_type=${txnType}&customer=${encodeURIComponent(customerName)}&client_id=${currentClientId}`);
+    const data = await r.json();
+    const available = parseFloat(data.available || 0);
+    wrap.style.display = available > 0 ? "block" : "none";
+    if (amountEl) amountEl.innerText = `BDT ${available.toFixed(2)}`;
+    if (applyInput) { applyInput.max = available; applyInput.value = 0; }
+    recalcLineItemTotals(entryId);
+  } catch (e) { /* ignore */ }
 }
 
 // ---------------- CUSTOMER PAYMENT / RECEIPT ----------------

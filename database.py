@@ -927,6 +927,66 @@ def _validate_required_shared_fields(table_name, entry_def, shared_data):
             raise ValueError(f"{f['label']} is required.")
 
 
+# ---------------- CUSTOMER CREDIT (OVERPAYMENT CARRY-FORWARD) ----------------
+# A pure append-only ledger, not a mutable balance column: a positive row is
+# credit created (the client paid/received more than one invoice's total),
+# a negative row is credit consumed (applied toward a later invoice for the
+# same party). Available balance is always SUM(amount) — this mirrors the
+# payments/payment_allocations audit-trail pattern rather than mutating a
+# running total in place, so every credit event stays traceable to the
+# invoice that created or consumed it.
+def get_available_credit(txn_type, customer_name, client_id):
+    if not customer_name:
+        return 0.0
+    conn, mode = get_db_connection()
+    cursor = conn.cursor()
+    ph = _ph(mode)
+    cursor.execute(
+        f"SELECT SUM(amount) as bal FROM customer_credits "
+        f"WHERE client_id = {ph} AND txn_type = {ph} AND customer_name = {ph}",
+        (client_id, txn_type, customer_name)
+    )
+    row = cursor.fetchone()
+    conn.close()
+    bal = row[0] if mode == 'sqlite' else row['bal']
+    return round(float(bal or 0), 2)
+
+
+def _record_credit_entry(cursor, mode, client_id, txn_type, customer_name, amount, reference_no, notes, created_by):
+    ph = _ph(mode)
+    now = datetime.now().isoformat(timespec='seconds')
+    cursor.execute(
+        f"INSERT INTO customer_credits (client_id, txn_type, customer_name, amount, reference_no, notes, created_by, created_at) "
+        f"VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})",
+        (client_id, txn_type, customer_name, round(amount, 2), reference_no, notes, created_by, now)
+    )
+
+
+def _consume_customer_credit(cursor, mode, client_id, txn_type, customer_name, requested_amount, reference_no, created_by):
+    """Validates a requested credit-application amount against the party's
+    actual available balance (never trusts the client's number), records a
+    negative ledger entry for whatever portion is actually consumable, and
+    returns that amount so the caller can fold it into this invoice's
+    effective advance."""
+    requested_amount = round(max(0.0, float(requested_amount or 0)), 2)
+    if requested_amount <= 0 or not customer_name:
+        return 0.0
+    ph = _ph(mode)
+    cursor.execute(
+        f"SELECT SUM(amount) as bal FROM customer_credits "
+        f"WHERE client_id = {ph} AND txn_type = {ph} AND customer_name = {ph}",
+        (client_id, txn_type, customer_name)
+    )
+    row = cursor.fetchone()
+    available = round(float((row[0] if mode == 'sqlite' else row['bal']) or 0), 2)
+    apply_amount = round(min(requested_amount, available), 2)
+    if apply_amount <= 0:
+        return 0.0
+    _record_credit_entry(cursor, mode, client_id, txn_type, customer_name, -apply_amount,
+                          reference_no, f"Applied to {reference_no}", created_by)
+    return apply_amount
+
+
 # ---------------- SAVE ENTRY ----------------
 def save_entry(entry_id, data, client_id=None, created_by=None):
     config = load_config()
@@ -976,16 +1036,41 @@ def save_entry(entry_id, data, client_id=None, created_by=None):
                 insert_data['cost_price'] = float(provided_cost)
 
             # Due is always authoritative server-side: total minus advance.
-            advance = float(insert_data.get('advance') or 0)
+            # Any requested credit application is validated against the
+            # buyer's real balance and folded into the effective advance;
+            # if the combined advance still exceeds this invoice's own
+            # total, the excess becomes a fresh credit entry rather than
+            # being silently absorbed — see the CUSTOMER CREDIT section.
+            applied_credit = _consume_customer_credit(
+                cursor, mode, client_id, 'Sales', insert_data.get('buyer_name'),
+                data.get('apply_credit'), insert_data.get('chalan_no'), created_by
+            )
+            advance = float(insert_data.get('advance') or 0) + applied_credit
             insert_data['due'] = round(max(0.0, insert_data['sale_total_price'] - advance), 2)
+            if advance > insert_data['sale_total_price']:
+                overpay = round(advance - insert_data['sale_total_price'], 2)
+                _record_credit_entry(cursor, mode, client_id, 'Sales', insert_data.get('buyer_name'),
+                                      overpay, insert_data.get('chalan_no'), 'Overpayment', created_by)
+                advance = insert_data['sale_total_price']
+            insert_data['advance'] = round(advance, 2)
 
         elif table_name == 'purchases':
             qty = float(insert_data.get('quantity') or 0)
             price = float(insert_data.get('unit_price') or 0)
             insert_data['total'] = round(qty * price, 2)
 
-            advance = float(insert_data.get('advance') or 0)
+            applied_credit = _consume_customer_credit(
+                cursor, mode, client_id, 'Purchase', insert_data.get('supplier_name'),
+                data.get('apply_credit'), insert_data.get('input_invoice_no'), created_by
+            )
+            advance = float(insert_data.get('advance') or 0) + applied_credit
             insert_data['due'] = round(max(0.0, insert_data['total'] - advance), 2)
+            if advance > insert_data['total']:
+                overpay = round(advance - insert_data['total'], 2)
+                _record_credit_entry(cursor, mode, client_id, 'Purchase', insert_data.get('supplier_name'),
+                                      overpay, insert_data.get('input_invoice_no'), 'Overpayment', created_by)
+                advance = insert_data['total']
+            insert_data['advance'] = round(advance, 2)
 
         elif table_name == 'transporters':
             # Rent is always authoritative server-side (rate * qty), same
@@ -1144,6 +1229,20 @@ def save_multi_item_entry(entry_id, shared_data, line_items, client_id=None, cre
 
         advance_total = float(shared_data.get('advance') or 0)
 
+        # Fold any requested credit application into the effective advance
+        # up front (validated against the real balance) — Previous-mode
+        # backfill rows are excluded, same rationale as the inventory skip
+        # above: there's no live balance workflow to apply against a
+        # historical record.
+        party_field = 'buyer_name' if table_name == 'sales' else 'supplier_name'
+        txn_type_label = 'Sales' if table_name == 'sales' else 'Purchase'
+        if table_name in ('sales', 'purchases') and not is_previous:
+            applied_credit = _consume_customer_credit(
+                cursor, mode, client_id, txn_type_label, shared_data.get(party_field),
+                shared_data.get('apply_credit'), ref_no, created_by
+            )
+            advance_total += applied_credit
+
         # Pass 1: compute each line's own total (and cost_price for sales)
         # before touching the DB, so the grand total is known up front.
         prepared = []
@@ -1174,6 +1273,15 @@ def save_multi_item_entry(entry_id, shared_data, line_items, client_id=None, cre
 
         overall_due = round(max(0.0, grand_total - advance_total), 2)
         overall_advance_applied = round(grand_total - overall_due, 2)
+
+        # Advance can never exceed this invoice's own grand total on the
+        # stored row (overall_advance_applied is already capped by the due
+        # floor above) — any excess becomes a fresh credit entry instead of
+        # being silently absorbed.
+        if table_name in ('sales', 'purchases') and not is_previous and advance_total > grand_total:
+            overpay = round(advance_total - grand_total, 2)
+            _record_credit_entry(cursor, mode, client_id, txn_type_label, shared_data.get(party_field),
+                                  overpay, ref_no, 'Overpayment', created_by)
 
         table_cols = {c['name'] for c in config['tables'][table_name]['columns']}
         new_ids = []
