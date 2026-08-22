@@ -21,7 +21,7 @@ from database import (
     save_challan_upload,
     list_customers_with_dues, list_customer_dues, save_payment,
     get_payment_detail, update_payment, delete_payment,
-    get_available_credit
+    get_available_credit, get_po_invoice_data
 )
 from google_drive import upload_challan_to_drive, upload_letterhead_pad_image, download_file_from_drive
 
@@ -578,6 +578,22 @@ def api_quotation_refs():
         return _forbidden()
     try:
         return jsonify(list_quotation_refs(client_id))
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+
+
+@app.route('/api/po_invoice', methods=['GET'])
+def api_po_invoice():
+    client_id = _scoped_client_id(request.args.get('client_id'))
+    if client_id is None:
+        return _forbidden()
+    customer = request.args.get('customer', '')
+    po_order = request.args.get('po_order', '')
+    try:
+        data = get_po_invoice_data(customer, po_order, client_id=client_id)
+        if not data:
+            return jsonify({"status": "error", "message": "No invoice data found for this customer/PO."}), 404
+        return jsonify(data)
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 400
 

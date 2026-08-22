@@ -652,7 +652,7 @@ def list_report_customer_options(report_id, client_id):
             if v:
                 names.add(v)
 
-    if report_id == 'sales_report':
+    if report_id in ('sales_report', 'po_invoice_report'):
         _collect(f"SELECT DISTINCT buyer_name FROM sales WHERE client_id = {ph} AND status = 'authorized'", 'buyer_name')
     else:
         _collect(f"SELECT DISTINCT buyer_name FROM sales WHERE client_id = {ph} AND status = 'authorized'", 'buyer_name')
@@ -1670,6 +1670,48 @@ def list_quotation_refs(client_id=None):
     rows = cursor.fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def get_po_invoice_data(customer, po_order, client_id=None):
+    """A single combined invoice for every sales line item a customer has
+    against one PO Order — potentially spanning several chalans (deliveries)
+    over time, unlike the regular per-chalan invoice. Feeds the PO-wise
+    Invoice report's print pad."""
+    config = load_config()
+    if not client_id:
+        client_id = config['system'].get('default_client_id', 'CLI-001')
+    conn, mode = get_db_connection()
+    cursor = conn.cursor()
+    ph = _ph(mode)
+    cursor.execute(
+        f"SELECT id, chalan_no, sale_date, buyer_name, address, product_type, size, "
+        f"received_quantity, sale_unit_price, sale_total_price, truck_no, advance, due "
+        f"FROM sales WHERE client_id = {ph} AND buyer_name = {ph} AND po_order = {ph} "
+        f"AND status = 'authorized' ORDER BY sale_date ASC, id ASC",
+        (client_id, customer, po_order)
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    items = [dict(r) for r in rows]
+    if not items:
+        return None
+    header = items[0]
+    return {
+        "customer_name": header.get('buyer_name'),
+        "address": header.get('address'),
+        "po_order": po_order,
+        "items": items,
+        # advance/due are only ever nonzero on the first row of each
+        # chalan's multi-item group (see save_multi_item_entry) — a plain
+        # SUM across every matching row is already correct by construction,
+        # same as list_invoice_refs()/customer_dues_report elsewhere.
+        "total_amount": round(sum(float(i.get('sale_total_price') or 0) for i in items), 2),
+        "total_advance": round(sum(float(i.get('advance') or 0) for i in items), 2),
+        "total_due": round(sum(float(i.get('due') or 0) for i in items), 2),
+        "total_quantity": round(sum(float(i.get('received_quantity') or 0) for i in items), 2),
+        "letterhead": get_letterhead_settings(),
+        "system": config.get('system', {})
+    }
 
 
 def get_quotation_data(quotation_no, client_id=None):

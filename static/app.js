@@ -1883,6 +1883,8 @@ async function renderReportView(reportId) {
 
   const periodFilter = document.getElementById("periodFilter");
   periodFilter.style.display = rp.supports_period ? "flex" : "none";
+  const dateFilterWrap = document.getElementById("dateFilterWrap");
+  if (dateFilterWrap) dateFilterWrap.style.display = rp.is_po_invoice_generator ? "none" : "contents";
   document.getElementById("customerFilterWrap").style.display = rp.supports_customer_filter ? "block" : "none";
   if (rp.supports_customer_filter) await populateReportCustomerFilter(reportId);
   const poFilterWrap = document.getElementById("poFilterWrap");
@@ -1906,6 +1908,29 @@ async function renderReportView(reportId) {
       if (sel) sel.value = "New";
     }
   }
+
+  // PO-wise Invoice is a generator, not a data table — swap the usual
+  // report table/toolbar-actions/summary bar for a single "Generate
+  // Invoice" button once Customer + PO are picked, reusing the same
+  // customer/PO dropdown infrastructure every other filtered report uses.
+  const tableWrap = document.getElementById("reportTableWrap");
+  const genWrap = document.getElementById("poInvoiceGenerateWrap");
+  const searchBoxWrap = document.getElementById("reportSearchBoxWrap");
+  const tableActionsWrap = document.getElementById("reportTableActionsWrap");
+  const summaryBar = document.getElementById("reportSummaryBar");
+  if (rp.is_po_invoice_generator) {
+    if (tableWrap) tableWrap.style.display = "none";
+    if (searchBoxWrap) searchBoxWrap.style.display = "none";
+    if (tableActionsWrap) tableActionsWrap.style.display = "none";
+    if (summaryBar) summaryBar.style.display = "none";
+    if (genWrap) genWrap.style.display = "block";
+    return;
+  }
+  if (tableWrap) tableWrap.style.display = "";
+  if (searchBoxWrap) searchBoxWrap.style.display = "";
+  if (tableActionsWrap) tableActionsWrap.style.display = "contents";
+  if (summaryBar) summaryBar.style.display = "";
+  if (genWrap) genWrap.style.display = "none";
 
   await loadReportData(reportId);
 }
@@ -2780,6 +2805,107 @@ function promptInvoiceLookup() {
 
 function closeInvoiceModal() {
   document.getElementById("invoiceModal").classList.remove("active");
+}
+
+// ---------------- PO-WISE INVOICE PAD ----------------
+// A single combined invoice across every chalan a customer has against one
+// PO Order — reuses the same .business-pad-paper/.pad-* styling and
+// applyPadBackground() as the per-chalan invoice/quotation pads, but (like
+// the quotation pad) grows to fit an unbounded number of rows instead of
+// being locked to one fixed physical-pad page.
+async function generatePoInvoice() {
+  const customer = document.getElementById("reportCustomerFilter")?.value;
+  const poOrder = document.getElementById("reportPoFilter")?.value;
+  if (!customer) { alert("Select a Customer first."); return; }
+  if (!poOrder) { alert("Select a PO Order first."); return; }
+  try {
+    const res = await apiFetch(`/api/po_invoice?customer=${encodeURIComponent(customer)}&po_order=${encodeURIComponent(poOrder)}&client_id=${currentClientId}`);
+    const data = await res.json();
+    if (data.status === "error") { alert(data.message || "No invoice data found."); return; }
+
+    const lh = data.letterhead;
+    const padPaper = document.getElementById("poiPadPaper");
+    const headerArea = document.getElementById("poiHeaderArea");
+    const padDivider = document.getElementById("poiDividerLine");
+    applyPadBackground(padPaper, headerArea, padDivider, lh, {
+      companyTitleId: "poiCompanyTitle", subHeadingId: "poiSubHeading", contactLineId: "poiContactLine"
+    }, { forceTextHeader: true });
+
+    document.getElementById("poiCustName").innerText = data.customer_name || "-";
+    document.getElementById("poiCustAddress").innerText = data.address || "";
+    document.getElementById("poiPoOrder").innerText = data.po_order || "-";
+    document.getElementById("poiGenDate").innerText = new Date().toISOString().split('T')[0];
+
+    const rowsHtml = data.items.map((item, i) => {
+      const qty = parseFloat(item.received_quantity || 0);
+      const price = parseFloat(item.sale_unit_price || 0);
+      const amount = parseFloat(item.sale_total_price || 0);
+      return `
+      <tr>
+        <td>${i + 1}</td>
+        <td>${item.sale_date || '-'}</td>
+        <td>${item.chalan_no || '-'}</td>
+        <td><strong>${item.product_type || '-'}</strong></td>
+        <td>${item.size || '-'}</td>
+        <td style="text-align:center;">${qty}</td>
+        <td>${item.truck_no || '-'}</td>
+        <td style="text-align:right;">${price.toFixed(2)}</td>
+        <td style="text-align:right;"><strong>${amount.toFixed(2)}</strong></td>
+      </tr>`;
+    }).join('');
+    document.getElementById("poiItemsBody").innerHTML = rowsHtml;
+
+    document.getElementById("poiTotalQuantity").innerText = parseFloat(data.total_quantity || 0);
+    document.getElementById("poiTotalAmount").innerText = `BDT ${parseFloat(data.total_amount || 0).toFixed(2)}`;
+    document.getElementById("poiTotalAdvance").innerText = `BDT ${parseFloat(data.total_advance || 0).toFixed(2)}`;
+    document.getElementById("poiTotalDue").innerText = `BDT ${parseFloat(data.total_due || 0).toFixed(2)}`;
+    document.getElementById("poiFooterNote").innerText = lh.footer_note || "Thank you for doing business with Jahan Trading!";
+
+    document.getElementById("poInvoiceModal").classList.add("active");
+  } catch (err) {
+    alert("Failed to generate invoice: " + err.message);
+  }
+}
+
+function closePoInvoiceModal() {
+  document.getElementById("poInvoiceModal").classList.remove("active");
+}
+
+async function savePoInvoiceAsPDF() {
+  const el = document.getElementById('poiPadPaper');
+  if (!el) return;
+  const container = el.closest('.invoice-modal-container');
+  const prevContainerMaxHeight = container ? container.style.maxHeight : null;
+  const prevContainerOverflow = container ? container.style.overflow : null;
+  const prevElOverflow = el.style.overflow;
+  if (container) { container.style.maxHeight = "none"; container.style.overflow = "visible"; }
+  el.style.overflow = "visible";
+
+  try {
+    const canvas = await html2canvas(el, { scale: 2, backgroundColor: '#ffffff', useCORS: true });
+    const { jsPDF } = window.jspdf;
+    const pdf = new jsPDF({ orientation: 'portrait', unit: 'pt', format: [PAD_PAGE_WIDTH_PT, PAD_PAGE_HEIGHT_PT] });
+    const imgWidth = PAD_PAGE_WIDTH_PT;
+    const imgHeight = canvas.height * imgWidth / canvas.width;
+    const imgData = canvas.toDataURL('image/jpeg', 0.95);
+
+    let heightLeft = imgHeight;
+    let position = 0;
+    pdf.addImage(imgData, 'JPEG', 0, position, imgWidth, imgHeight);
+    heightLeft -= PAD_PAGE_HEIGHT_PT;
+    while (heightLeft > 0) {
+      position = heightLeft - imgHeight;
+      pdf.addPage();
+      pdf.addImage(imgData, 'JPEG', 0, position, imgWidth, imgHeight);
+      heightLeft -= PAD_PAGE_HEIGHT_PT;
+    }
+    pdf.save(`PO_Invoice_${(document.getElementById('poiPoOrder')?.innerText || 'po')}.pdf`);
+  } catch (err) {
+    alert("Could not save PDF: " + err.message);
+  } finally {
+    el.style.overflow = prevElOverflow;
+    if (container) { container.style.maxHeight = prevContainerMaxHeight; container.style.overflow = prevContainerOverflow; }
+  }
 }
 
 // ---------------- QUOTATION PRINT PAD ----------------
