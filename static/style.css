@@ -779,6 +779,10 @@ select.form-control {
   color: #64748b;
 }
 .poi-sig-received { text-align: right; }
+/* Business owner's actual signature stamp, auto-placed above the
+   Authorised Signature line (po_signature.png, cropped from signature.png
+   in the project root) — no per-invoice upload needed. */
+.poi-sig-stamp { display: block; height: 55px; width: auto; margin: 0 auto -14px auto; }
 .poi-footer {
   margin-top: 16px;
   text-align: center;
@@ -786,6 +790,29 @@ select.form-control {
   color: #64748b;
   border-top: 1px solid #e2e8f0;
   padding-top: 6px;
+}
+
+/* PO-wise Invoice uses the client's actual pre-designed pad artwork
+   (jahan pad.jpg, cropped into three static assets) instead of the
+   letterhead-settings-driven text header/footer the other pads use — the
+   client supplied real branded artwork for this pad specifically, so
+   there's no dynamic company-name/contact text to substitute in.
+   .poi-pad zeroes .business-pad-paper's own padding since the header/
+   footer images must span full-bleed edge-to-edge; .poi-content carries
+   the actual inset padding for the invoice body instead. */
+.poi-pad { padding: 0; }
+.poi-header-img, .poi-footer-img { display: block; width: 100%; height: auto; }
+.poi-footer-img { margin-top: 10px; }
+.poi-content { position: relative; padding: 20px 50px 30px 50px; }
+.poi-watermark {
+  position: absolute;
+  z-index: -1;
+  top: 30px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 300px;
+  height: auto;
+  pointer-events: none;
 }
 
 /* RESPONSIVE / MOBILE LAYOUT */
@@ -916,6 +943,22 @@ select.form-control {
      must not compress the pad below its true aspect ratio. */
   .invoice-modal-container { width: 100%; max-height: none !important; overflow: visible !important; border: none !important; box-shadow: none !important; background: transparent; }
   .business-pad-paper { padding: 0; overflow: visible !important; border: none !important; outline: none !important; box-shadow: none !important; }
+
+  /* PO-wise Invoice: repeat the header/footer pad artwork on EVERY printed
+     page (not just the first/last), since a PO can span many chalans and
+     the browser's native print pagination breaks .poi-content across
+     several physical pages. position:fixed children are anchored to the
+     page box itself in paged media (not their nearest positioned
+     ancestor), so this repeats automatically — the same technique
+     savePoInvoiceAsPDF() achieves manually for the "Save" button's export,
+     since html2canvas has no concept of page-aware repetition. Heights are
+     the known pixel aspect ratio of po_pad_header.png (1253x248) and
+     po_pad_footer.png (1253x105) scaled to the 8.5in page width, with a
+     small safety margin so body content never touches them. */
+  .poi-header-img { position: fixed; top: 0; left: 0; width: 8.5in; }
+  .poi-footer-img { position: fixed; bottom: 0; left: 0; width: 8.5in; }
+  .poi-watermark { position: fixed; }
+  .poi-content { padding-top: 1.75in !important; padding-bottom: 0.85in !important; }
 }
 
 /* The client's real pre-printed pad is US Letter (8.5in x 11in) — this

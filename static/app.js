@@ -2823,13 +2823,12 @@ async function generatePoInvoice() {
     const data = await res.json();
     if (data.status === "error") { alert(data.message || "No invoice data found."); return; }
 
+    // Unlike the other two pads, this one uses the client's own
+    // pre-designed pad artwork (static po_pad_header/footer/watermark
+    // images — see style.css) instead of applyPadBackground()'s
+    // letterhead-settings-driven text header, so there's no company-name/
+    // contact text to populate here.
     const lh = data.letterhead;
-    const padPaper = document.getElementById("poiPadPaper");
-    const headerArea = document.getElementById("poiHeaderArea");
-    const padDivider = document.getElementById("poiDividerLine");
-    applyPadBackground(padPaper, headerArea, padDivider, lh, {
-      companyTitleId: "poiCompanyTitle", subHeadingId: "poiSubHeading", contactLineId: "poiContactLine"
-    }, { forceTextHeader: true });
 
     document.getElementById("poiCustName").innerText = data.customer_name || "-";
     document.getElementById("poiCustAddress").innerText = data.address || "";
@@ -2871,6 +2870,32 @@ function closePoInvoiceModal() {
   document.getElementById("poInvoiceModal").classList.remove("active");
 }
 
+// Renders a loaded <img> element to a same-origin PNG data URL so jsPDF
+// gets a guaranteed-decodable image source, rather than relying on its own
+// format sniffing of an HTMLImageElement passed directly.
+function imageElementToDataUrl(imgEl) {
+  const canvas = document.createElement('canvas');
+  canvas.width = imgEl.naturalWidth;
+  canvas.height = imgEl.naturalHeight;
+  canvas.getContext('2d').drawImage(imgEl, 0, 0);
+  return canvas.toDataURL('image/png');
+}
+
+// The header/footer pad artwork must repeat on EVERY page of a multi-page
+// PO invoice, not just appear once at the top/bottom of one long canvas
+// (which is what naively rasterizing #poiPadPaper as a whole and slicing it
+// would produce — see the earlier single-canvas-slice approach used by
+// saveElementAsPDF()/saveQuotationAsPDF(), which is fine for content that's
+// always short but wrong here since a PO can span many chalans/pages).
+// Instead: capture the header/footer images once, capture just the
+// scrollable body (.poi-content) as one tall canvas, then plan pages by
+// measuring each table row's own pixel bounds in the LIVE DOM (not a fixed
+// arithmetic page height) so a slice boundary always falls BETWEEN rows,
+// never through one — a naive fixed-height slice cut rows in half, leaving
+// a truncated fragment trapped under the footer bar on one page and the
+// same row repeated in full at the top of the next. The table header
+// repeats on every page too, and the totals/signature/footer-note block is
+// kept atomic (pushed onto a fresh page if it wouldn't fit whole).
 async function savePoInvoiceAsPDF() {
   const el = document.getElementById('poiPadPaper');
   if (!el) return;
@@ -2882,23 +2907,102 @@ async function savePoInvoiceAsPDF() {
   el.style.overflow = "visible";
 
   try {
-    const canvas = await html2canvas(el, { scale: 2, backgroundColor: '#ffffff', useCORS: true });
+    const headerImgEl = document.querySelector('.poi-header-img');
+    const footerImgEl = document.querySelector('.poi-footer-img');
+    const bodyEl = document.querySelector('.poi-content');
+    const theadEl = bodyEl.querySelector('.pad-table thead');
+    const totalsRowEl = bodyEl.querySelector('.pad-totals-row');
+    const rowEls = Array.from(document.getElementById('poiItemsBody').children);
+
+    const headerHeightPt = PAD_PAGE_WIDTH_PT * (headerImgEl.naturalHeight / headerImgEl.naturalWidth);
+    const footerHeightPt = PAD_PAGE_WIDTH_PT * (footerImgEl.naturalHeight / footerImgEl.naturalWidth);
+    const budgetPt = PAD_PAGE_HEIGHT_PT - headerHeightPt - footerHeightPt;
+
+    const headerDataUrl = imageElementToDataUrl(headerImgEl);
+    const footerDataUrl = imageElementToDataUrl(footerImgEl);
+
+    const bodyCanvas = await html2canvas(bodyEl, { scale: 2, backgroundColor: '#ffffff', useCORS: true });
+    const pxPerPt = bodyCanvas.width / PAD_PAGE_WIDTH_PT;
+    const budgetPx = budgetPt * pxPerPt;
+
+    // Measure every region's canvas-pixel [top, bottom) from the live DOM,
+    // relative to bodyEl's own top edge, scaled by the same factor
+    // html2canvas used to rasterize it.
+    const contentRect = bodyEl.getBoundingClientRect();
+    const canvasScaleY = bodyCanvas.height / contentRect.height;
+    const regionPx = (rect) => ({
+      top: (rect.top - contentRect.top) * canvasScaleY,
+      bottom: (rect.bottom - contentRect.top) * canvasScaleY
+    });
+    const thead = regionPx(theadEl.getBoundingClientRect());
+    const trailing = { top: regionPx(totalsRowEl.getBoundingClientRect()).top, bottom: bodyCanvas.height };
+    const meta = { top: 0, bottom: thead.top };
+    const rows = rowEls.map(tr => regionPx(tr.getBoundingClientRect()));
+
+    const theadHeightPx = thead.bottom - thead.top;
+    const metaHeightPx = meta.bottom - meta.top;
+    const trailingHeightPx = trailing.bottom - trailing.top;
+
+    // Plan which rows land on which page — a new page starts only between
+    // rows, never mid-row, and the trailing block only joins the last page
+    // if it fits whole.
+    const pages = [];
+    let currentRowIdxs = [];
+    let usedPx = metaHeightPx + theadHeightPx;
+    let isFirstPage = true;
+    for (let i = 0; i < rows.length; i++) {
+      const rowHeightPx = rows[i].bottom - rows[i].top;
+      if (currentRowIdxs.length > 0 && usedPx + rowHeightPx > budgetPx) {
+        pages.push({ rowIdxs: currentRowIdxs, includeMeta: isFirstPage, includeTrailing: false });
+        currentRowIdxs = [];
+        isFirstPage = false;
+        usedPx = theadHeightPx;
+      }
+      currentRowIdxs.push(i);
+      usedPx += rowHeightPx;
+    }
+    if (usedPx + trailingHeightPx <= budgetPx) {
+      pages.push({ rowIdxs: currentRowIdxs, includeMeta: isFirstPage, includeTrailing: true });
+    } else {
+      pages.push({ rowIdxs: currentRowIdxs, includeMeta: isFirstPage, includeTrailing: false });
+      pages.push({ rowIdxs: [], includeMeta: false, includeTrailing: true });
+    }
+
     const { jsPDF } = window.jspdf;
     const pdf = new jsPDF({ orientation: 'portrait', unit: 'pt', format: [PAD_PAGE_WIDTH_PT, PAD_PAGE_HEIGHT_PT] });
-    const imgWidth = PAD_PAGE_WIDTH_PT;
-    const imgHeight = canvas.height * imgWidth / canvas.width;
-    const imgData = canvas.toDataURL('image/jpeg', 0.95);
 
-    let heightLeft = imgHeight;
-    let position = 0;
-    pdf.addImage(imgData, 'JPEG', 0, position, imgWidth, imgHeight);
-    heightLeft -= PAD_PAGE_HEIGHT_PT;
-    while (heightLeft > 0) {
-      position = heightLeft - imgHeight;
-      pdf.addPage();
-      pdf.addImage(imgData, 'JPEG', 0, position, imgWidth, imgHeight);
-      heightLeft -= PAD_PAGE_HEIGHT_PT;
-    }
+    pages.forEach((pageDef, pageIdx) => {
+      if (pageIdx > 0) pdf.addPage();
+
+      let pageHeightPx = theadHeightPx;
+      if (pageDef.includeMeta) pageHeightPx += metaHeightPx;
+      pageDef.rowIdxs.forEach(i => { pageHeightPx += rows[i].bottom - rows[i].top; });
+      if (pageDef.includeTrailing) pageHeightPx += trailingHeightPx;
+
+      const pageCanvas = document.createElement('canvas');
+      pageCanvas.width = bodyCanvas.width;
+      pageCanvas.height = Math.max(1, pageHeightPx);
+      const ctx = pageCanvas.getContext('2d');
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, pageCanvas.width, pageCanvas.height);
+
+      let dy = 0;
+      const stamp = (region) => {
+        const h = region.bottom - region.top;
+        ctx.drawImage(bodyCanvas, 0, region.top, bodyCanvas.width, h, 0, dy, bodyCanvas.width, h);
+        dy += h;
+      };
+      if (pageDef.includeMeta) stamp(meta);
+      stamp(thead);
+      pageDef.rowIdxs.forEach(i => stamp(rows[i]));
+      if (pageDef.includeTrailing) stamp(trailing);
+
+      const pageHeightPt = pageHeightPx / pxPerPt;
+      pdf.addImage(headerDataUrl, 'PNG', 0, 0, PAD_PAGE_WIDTH_PT, headerHeightPt);
+      pdf.addImage(pageCanvas.toDataURL('image/jpeg', 0.95), 'JPEG', 0, headerHeightPt, PAD_PAGE_WIDTH_PT, pageHeightPt);
+      pdf.addImage(footerDataUrl, 'PNG', 0, PAD_PAGE_HEIGHT_PT - footerHeightPt, PAD_PAGE_WIDTH_PT, footerHeightPt);
+    });
+
     pdf.save(`PO_Invoice_${(document.getElementById('poiPoOrder')?.innerText || 'po')}.pdf`);
   } catch (err) {
     alert("Could not save PDF: " + err.message);

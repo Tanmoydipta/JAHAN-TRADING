@@ -642,63 +642,66 @@
         </div>
       </div>
 
-      <div class="business-pad-paper" id="poiPadPaper">
-        <div class="pad-header" id="poiHeaderArea">
-          <div class="pad-company-title" id="poiCompanyTitle">JAHAN TRADING CO.</div>
-          <div class="pad-sub-heading" id="poiSubHeading">Importers, Exporters & Wholesale Distributors</div>
-          <div class="pad-contact-line" id="poiContactLine">14 Commercial Center, Motijheel, Dhaka | Phone: +880 1711-998877</div>
+      <div class="business-pad-paper poi-pad" id="poiPadPaper">
+        <img class="poi-header-img" src="/static/po_pad_header.png" alt="">
+
+        <div class="poi-content">
+          <img class="poi-watermark" src="/static/po_pad_watermark.png" alt="">
+
+          <div class="pad-meta-row">
+            <div class="pad-customer-box">
+              <div class="meta-title">BILLED TO:</div>
+              <div class="cust-name" id="poiCustName">-</div>
+              <div class="cust-detail" id="poiCustAddress"></div>
+            </div>
+            <div class="pad-invoice-box">
+              <div class="inv-title">PO-WISE INVOICE</div>
+              <div class="inv-meta-line"><span>PO Order:</span> <strong id="poiPoOrder">-</strong></div>
+              <div class="inv-meta-line"><span>Generated:</span> <strong id="poiGenDate">-</strong></div>
+            </div>
+          </div>
+
+          <table class="pad-table">
+            <thead>
+              <tr>
+                <th style="width: 5%;">SL</th>
+                <th style="width: 9%;">DATE</th>
+                <th style="width: 10%;">CHALAN #</th>
+                <th style="width: 22%;">DESCRIPTION</th>
+                <th style="width: 9%;">SIZE</th>
+                <th style="width: 9%; text-align: center;">QTY</th>
+                <th style="width: 11%;">TRUCK NO</th>
+                <th style="width: 11%; text-align: right;">UNIT PRICE</th>
+                <th style="width: 14%; text-align: right;">AMOUNT (BDT)</th>
+              </tr>
+            </thead>
+            <tbody id="poiItemsBody"></tbody>
+          </table>
+
+          <div class="pad-totals-row">
+            <div class="pad-notes-box">
+              <div class="meta-title">TOTAL QUANTITY</div>
+              <p id="poiTotalQuantity">0</p>
+            </div>
+            <div class="pad-totals-box">
+              <div class="tot-line"><span>Total Amount:</span><span id="poiTotalAmount">BDT 0.00</span></div>
+              <div class="tot-line"><span>Total Advance:</span><span id="poiTotalAdvance">BDT 0.00</span></div>
+              <div class="tot-line grand-total"><span>Total Due:</span><span id="poiTotalDue">BDT 0.00</span></div>
+            </div>
+          </div>
+
+          <div class="poi-signature-row">
+            <div class="poi-sig-authorised">
+              <img src="/static/po_signature.png" alt="" class="poi-sig-stamp">
+              <div class="sig-line"></div><span>Authorised Signature</span>
+            </div>
+            <div class="poi-sig-received"><div class="sig-line"></div><span>Received Signature</span></div>
+          </div>
+
+          <div class="poi-footer" id="poiFooterNote">Thank you for doing business with Jahan Trading!</div>
         </div>
 
-        <div class="pad-divider" id="poiDividerLine"></div>
-
-        <div class="pad-meta-row">
-          <div class="pad-customer-box">
-            <div class="meta-title">BILLED TO:</div>
-            <div class="cust-name" id="poiCustName">-</div>
-            <div class="cust-detail" id="poiCustAddress"></div>
-          </div>
-          <div class="pad-invoice-box">
-            <div class="inv-title">PO-WISE INVOICE</div>
-            <div class="inv-meta-line"><span>PO Order:</span> <strong id="poiPoOrder">-</strong></div>
-            <div class="inv-meta-line"><span>Generated:</span> <strong id="poiGenDate">-</strong></div>
-          </div>
-        </div>
-
-        <table class="pad-table">
-          <thead>
-            <tr>
-              <th style="width: 5%;">SL</th>
-              <th style="width: 9%;">DATE</th>
-              <th style="width: 10%;">CHALAN #</th>
-              <th style="width: 22%;">DESCRIPTION</th>
-              <th style="width: 9%;">SIZE</th>
-              <th style="width: 9%; text-align: center;">QTY</th>
-              <th style="width: 11%;">TRUCK NO</th>
-              <th style="width: 11%; text-align: right;">UNIT PRICE</th>
-              <th style="width: 14%; text-align: right;">AMOUNT (BDT)</th>
-            </tr>
-          </thead>
-          <tbody id="poiItemsBody"></tbody>
-        </table>
-
-        <div class="pad-totals-row">
-          <div class="pad-notes-box">
-            <div class="meta-title">TOTAL QUANTITY</div>
-            <p id="poiTotalQuantity">0</p>
-          </div>
-          <div class="pad-totals-box">
-            <div class="tot-line"><span>Total Amount:</span><span id="poiTotalAmount">BDT 0.00</span></div>
-            <div class="tot-line"><span>Total Advance:</span><span id="poiTotalAdvance">BDT 0.00</span></div>
-            <div class="tot-line grand-total"><span>Total Due:</span><span id="poiTotalDue">BDT 0.00</span></div>
-          </div>
-        </div>
-
-        <div class="poi-signature-row">
-          <div class="poi-sig-authorised"><div class="sig-line"></div><span>Authorised Signature</span></div>
-          <div class="poi-sig-received"><div class="sig-line"></div><span>Received Signature</span></div>
-        </div>
-
-        <div class="poi-footer" id="poiFooterNote">Thank you for doing business with Jahan Trading!</div>
+        <img class="poi-footer-img" src="/static/po_pad_footer.png" alt="">
       </div>
     </div>
   </div>
