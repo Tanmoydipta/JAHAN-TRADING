@@ -761,6 +761,33 @@ select.form-control {
   margin-top: 16px;
 }
 
+/* The PO-wise Invoice pad also grows to fit content (an unbounded number of
+   chalans) — it originally reused the fixed-size invoice pad's
+   .pad-signature-row/.pad-footer, which are position:absolute pinned to a
+   fixed offset from the pad's bottom edge. On a growing pad that offset is
+   measured from wherever the flow content happens to end, not from any
+   physical page boundary, so it drifted out of alignment with the actual
+   last row of content (worse the more chalans/pages a PO invoice had).
+   Fixed the same way the quotation pad already solves this: normal
+   document flow instead of absolute positioning, so signature/footer
+   always sit directly after the totals row regardless of row count. */
+.poi-signature-row { display: flex; justify-content: space-between; margin-top: 30px; }
+.poi-sig-authorised, .poi-sig-received {
+  width: 200px;
+  text-align: center;
+  font-size: 11px;
+  color: #64748b;
+}
+.poi-sig-received { text-align: right; }
+.poi-footer {
+  margin-top: 16px;
+  text-align: center;
+  font-size: 10px;
+  color: #64748b;
+  border-top: 1px solid #e2e8f0;
+  padding-top: 6px;
+}
+
 /* RESPONSIVE / MOBILE LAYOUT */
 @media (max-width: 860px) {
   .sidebar {

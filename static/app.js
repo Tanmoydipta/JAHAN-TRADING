@@ -2847,7 +2847,7 @@ async function generatePoInvoice() {
         <td>${item.chalan_no || '-'}</td>
         <td><strong>${item.product_type || '-'}</strong></td>
         <td>${item.size || '-'}</td>
-        <td style="text-align:center;">${qty}</td>
+        <td style="text-align:center;"><strong>${qty}</strong></td>
         <td>${item.truck_no || '-'}</td>
         <td style="text-align:right;">${price.toFixed(2)}</td>
         <td style="text-align:right;"><strong>${amount.toFixed(2)}</strong></td>
