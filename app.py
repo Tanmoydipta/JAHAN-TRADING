@@ -18,6 +18,7 @@ from database import (
     create_session_token, verify_session_token, revoke_session_token,
     get_letterhead_settings, save_letterhead_settings,
     list_quotation_refs, get_quotation_data, approve_quotation,
+    list_purchase_order_refs, get_purchase_order_data, confirm_purchase_order,
     save_challan_upload,
     list_customers_with_dues, list_customer_dues, save_payment,
     get_payment_detail, update_payment, delete_payment,
@@ -618,6 +619,43 @@ def api_approve_quotation(quotation_no):
     requested_by = request.current_user['username']
     try:
         return jsonify(approve_quotation(quotation_no, requested_by, client_id=client_id))
+    except ValueError as e:
+        return jsonify({"status": "error", "message": str(e)}), 403
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+
+
+@app.route('/api/purchase_order_refs', methods=['GET'])
+def api_purchase_order_refs():
+    client_id = _scoped_client_id(request.args.get('client_id'))
+    if client_id is None:
+        return _forbidden()
+    try:
+        return jsonify(list_purchase_order_refs(client_id))
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+
+
+@app.route('/api/purchase_order/<purchase_order_no>', methods=['GET'])
+def api_get_purchase_order(purchase_order_no):
+    client_id = _scoped_client_id(request.args.get('client_id'))
+    if client_id is None:
+        return _forbidden()
+    res = get_purchase_order_data(purchase_order_no, client_id=client_id)
+    if not res:
+        return jsonify({"status": "error", "message": "Purchase order not found"}), 404
+    return jsonify(res)
+
+
+@app.route('/api/purchase_order/<purchase_order_no>/confirm', methods=['POST'])
+def api_confirm_purchase_order(purchase_order_no):
+    data = request.json or {}
+    client_id = _scoped_client_id(data.get('client_id'))
+    if client_id is None:
+        return _forbidden()
+    requested_by = request.current_user['username']
+    try:
+        return jsonify(confirm_purchase_order(purchase_order_no, requested_by, client_id=client_id))
     except ValueError as e:
         return jsonify({"status": "error", "message": str(e)}), 403
     except Exception as e:

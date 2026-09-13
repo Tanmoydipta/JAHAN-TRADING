@@ -865,6 +865,7 @@ MULTI_LINE_ITEM_FIELDS = {
     'sales': {'product_type', 'size', 'cost_price', 'received_quantity', 'sale_unit_price', 'unloading_cost_per_unit'},
     'purchases': {'product_type', 'size', 'unit_price', 'quantity'},
     'quotations': {'product_type', 'size', 'origin', 'unit_price', 'quantity'},
+    'purchase_orders': {'product_type', 'size', 'unit_price', 'quantity'},
 }
 
 
@@ -1170,9 +1171,10 @@ def save_entry(entry_id, data, client_id=None, created_by=None):
 
 def save_multi_item_entry(entry_id, shared_data, line_items, client_id=None, created_by=None):
     """Like save_entry(), but inserts one row per product line item, all
-    sharing a single chalan_no/input_invoice_no/quotation_no. Supports sales,
-    purchases and quotations — the only tables with a per-transaction
-    reference number that multiple product rows can share.
+    sharing a single chalan_no/input_invoice_no/quotation_no/purchase_order_no.
+    Supports sales, purchases, quotations and purchase_orders — the only
+    tables with a per-transaction reference number that multiple product
+    rows can share.
 
     Advance/due are invoice-level concepts but the schema stores them per
     row, so the full advance and the resulting due are attributed entirely
@@ -1180,7 +1182,8 @@ def save_multi_item_entry(entry_id, shared_data, line_items, client_id=None, cre
     SUM(advance) across the invoice's rows numerically correct without
     prorating — prorating would let a single overpaid/underpaid line item
     silently misstate that item's own due while the others looked fine.
-    Quotations have no advance/due columns at all, so this is a no-op for them.
+    Quotations and purchase_orders have no advance/due columns at all, so
+    this is a no-op for them.
     """
     config = load_config()
     if not client_id:
@@ -1191,8 +1194,8 @@ def save_multi_item_entry(entry_id, shared_data, line_items, client_id=None, cre
         raise ValueError(f"Unknown entry point ID: {entry_id}")
 
     table_name = entry_def['table']
-    if table_name not in ('sales', 'purchases', 'quotations'):
-        raise ValueError("Multi-item entry is only supported for sales, purchases and quotations")
+    if table_name not in ('sales', 'purchases', 'quotations', 'purchase_orders'):
+        raise ValueError("Multi-item entry is only supported for sales, purchases, quotations and purchase orders")
     if not line_items:
         raise ValueError("At least one product line item is required")
 
@@ -1224,8 +1227,10 @@ def save_multi_item_entry(entry_id, shared_data, line_items, client_id=None, cre
             ref_no = shared_data.get('input_invoice_no')
             if not ref_no:
                 raise ValueError("Input Invoice No is required")
-        else:
+        elif table_name == 'quotations':
             ref_no = shared_data.get('quotation_no') or get_next_quotation_no(client_id)
+        else:
+            ref_no = shared_data.get('purchase_order_no') or get_next_po_no(client_id)
 
         advance_total = float(shared_data.get('advance') or 0)
 
@@ -1295,8 +1300,10 @@ def save_multi_item_entry(entry_id, shared_data, line_items, client_id=None, cre
                 insert_data['chalan_no'] = ref_no
             elif table_name == 'purchases':
                 insert_data['input_invoice_no'] = ref_no
-            else:
+            elif table_name == 'quotations':
                 insert_data['quotation_no'] = ref_no
+            else:
+                insert_data['purchase_order_no'] = ref_no
 
             insert_data['advance'] = overall_advance_applied if idx == 0 else 0
             insert_data['due'] = overall_due if idx == 0 else 0
@@ -1313,8 +1320,9 @@ def save_multi_item_entry(entry_id, shared_data, line_items, client_id=None, cre
                 insert_data['authorized_by'] = created_by if is_admin else None
                 insert_data['authorized_at'] = now if is_admin else None
             else:
-                # Quotations always start pending — an admin must explicitly
-                # approve them via the Quotation Report, regardless of who created it.
+                # Quotations and purchase orders always start pending — an
+                # admin must explicitly approve/confirm them via their report,
+                # regardless of who created it.
                 insert_data['status'] = 'pending'
                 insert_data['authorized_by'] = None
                 insert_data['authorized_at'] = None
@@ -1372,8 +1380,10 @@ def save_multi_item_entry(entry_id, shared_data, line_items, client_id=None, cre
             result["chalan_no"] = ref_no
         elif table_name == 'purchases':
             result["input_invoice_no"] = ref_no
-        else:
+        elif table_name == 'quotations':
             result["quotation_no"] = ref_no
+        else:
+            result["purchase_order_no"] = ref_no
         return result
     finally:
         conn.close()
@@ -1785,6 +1795,119 @@ def approve_quotation(quotation_no, requested_by, client_id=None):
         conn.close()
 
 
+# ---------------- PURCHASE ORDERS ----------------
+# A Purchase Order is the business's own order placed with a supplier —
+# distinct from `sales.po_order` (a customer's PO number recorded against a
+# sale). Mirrors the Quotation workflow (pending -> confirmed, then linkable
+# into a live transaction) but on the purchase side: a Purchase Order must
+# be confirmed via the Purchase Order Report before it can be linked into a
+# Purchase Entry.
+def get_next_po_no(client_id):
+    # Same MAX-numeric-suffix scheme as get_next_quotation_no() — immune to
+    # gaps from a deleted/renumbered row, unlike a COUNT-based scheme.
+    config = load_config()
+    pad = int(config['system'].get('chalan_pad', 6))
+    conn, mode = get_db_connection()
+    cursor = conn.cursor()
+    ph = _ph(mode)
+    cursor.execute(f"SELECT purchase_order_no FROM purchase_orders WHERE client_id = {ph}", (client_id,))
+    rows = cursor.fetchall()
+    conn.close()
+    max_no = 0
+    for r in rows:
+        pno = r[0] if mode == 'sqlite' else r['purchase_order_no']
+        if pno and pno.startswith('PORD-') and pno[5:].isdigit():
+            max_no = max(max_no, int(pno[5:]))
+    next_no = max_no + 1
+    return f"PORD-{str(next_no).zfill(pad)}"
+
+
+def list_purchase_order_refs(client_id=None):
+    """Confirmed purchase orders available to link into a Purchase Entry."""
+    config = load_config()
+    if not client_id:
+        client_id = config['system'].get('default_client_id', 'CLI-001')
+    conn, mode = get_db_connection()
+    cursor = conn.cursor()
+    ph = _ph(mode)
+    cursor.execute(
+        f"SELECT DISTINCT purchase_order_no, supplier_name FROM purchase_orders "
+        f"WHERE client_id = {ph} AND status = {ph} ORDER BY purchase_order_no DESC",
+        (client_id, 'confirmed')
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_purchase_order_data(purchase_order_no, client_id=None):
+    config = load_config()
+    if not client_id:
+        client_id = config['system'].get('default_client_id', 'CLI-001')
+    conn, mode = get_db_connection()
+    cursor = conn.cursor()
+    ph = _ph(mode)
+    cursor.execute(
+        f"SELECT * FROM purchase_orders WHERE purchase_order_no = {ph} AND client_id = {ph} ORDER BY id ASC",
+        (purchase_order_no, client_id)
+    )
+    rows = cursor.fetchall()
+    items = [dict(r) for r in rows] if mode == 'sqlite' else list(rows)
+    conn.close()
+    if not items:
+        return None
+    header = items[0]
+    grand_total = round(sum(float(i.get('total') or 0) for i in items), 2)
+    return {
+        "purchase_order_no": purchase_order_no,
+        "supplier_name": header.get('supplier_name'),
+        "mobile_number": header.get('mobile_number'),
+        "po_date": header.get('po_date'),
+        "status": header.get('status'),
+        "delivery_address": header.get('delivery_address'),
+        "items": items,
+        "grand_total": grand_total,
+        "letterhead": get_letterhead_settings(),
+        "system": config.get('system', {})
+    }
+
+
+def confirm_purchase_order(purchase_order_no, requested_by, client_id=None):
+    config = load_config()
+    if not client_id:
+        client_id = config['system'].get('default_client_id', 'CLI-001')
+
+    conn, mode = get_db_connection()
+    cursor = conn.cursor()
+    ph = _ph(mode)
+
+    try:
+        role = _lookup_user_role(cursor, mode, requested_by)
+        if role != 'admin':
+            raise ValueError("Only an admin can confirm purchase orders")
+
+        cursor.execute(
+            f"SELECT COUNT(*) as cnt FROM purchase_orders WHERE purchase_order_no = {ph} AND client_id = {ph}",
+            (purchase_order_no, client_id)
+        )
+        row = cursor.fetchone()
+        cnt = row[0] if mode == 'sqlite' else row['cnt']
+        if not cnt:
+            raise ValueError("Purchase order not found")
+
+        now = datetime.now().isoformat(timespec='seconds')
+        cursor.execute(
+            f"UPDATE purchase_orders SET status = {ph}, confirmed_by = {ph}, confirmed_at = {ph} "
+            f"WHERE purchase_order_no = {ph} AND client_id = {ph}",
+            ('confirmed', requested_by, now, purchase_order_no, client_id)
+        )
+        if mode == 'sqlite':
+            conn.commit()
+        return {"status": "success", "purchase_order_no": purchase_order_no}
+    finally:
+        conn.close()
+
+
 # ---------------- AUTHORIZATION ----------------
 def authorize_entry(table_name, record_id, authorized_by, client_id=None):
     if table_name not in ('sales', 'purchases'):
@@ -1873,7 +1996,7 @@ def list_pending_transactions(client_id=None):
     return {"purchases": purchases, "sales": sales}
 
 
-DELETABLE_TABLES = ('products', 'inventory', 'customers', 'transporters', 'purchases', 'sales', 'quotations')
+DELETABLE_TABLES = ('products', 'inventory', 'customers', 'transporters', 'purchases', 'sales', 'quotations', 'purchase_orders')
 
 # Master data with no derived/dependent fields (no totals, no inventory
 # side-effects, no authorization workflow) — a plain column update is safe.

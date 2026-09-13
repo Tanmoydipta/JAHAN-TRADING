@@ -937,7 +937,7 @@ select.form-control {
   /* Hide all modals by default when printing */
   .modal-overlay { display: none !important; }
   /* Only show the invoice/quotation modal if it's actually open */
-  #invoiceModal.active, #quotationModal.active, #poInvoiceModal.active { position: static !important; display: block !important; background: transparent !important; }
+  #invoiceModal.active, #quotationModal.active, #poInvoiceModal.active, #purchaseOrderModal.active { position: static !important; display: block !important; background: transparent !important; }
   /* max-height/overflow reset: the modal is normally capped to 90vh (with a
      scrollbar) so it fits a small screen — in print/export that constraint
      must not compress the pad below its true aspect ratio. */

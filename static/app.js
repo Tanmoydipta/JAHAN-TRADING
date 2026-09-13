@@ -437,7 +437,8 @@ async function deleteUser(userId) {
 const MULTI_ITEM_FIELDS = {
   new_sale: ['product_type', 'size', 'cost_price', 'received_quantity', 'sale_unit_price', 'unloading_cost_per_unit'],
   new_purchase: ['product_type', 'size', 'unit_price', 'quantity'],
-  new_quotation: ['product_type', 'size', 'origin', 'unit_price', 'quantity']
+  new_quotation: ['product_type', 'size', 'origin', 'unit_price', 'quantity'],
+  new_purchase_order: ['product_type', 'size', 'unit_price', 'quantity']
 };
 
 // New/Previous entry mode for Sales & Purchase — "Previous" is a manual
@@ -481,7 +482,7 @@ function effectiveFieldType(f, entryId) {
   // branch below) — only reference-number lookups tied to a *live*
   // transaction (an existing chalan/quotation) get downgraded, since
   // there's nothing live to reference during a historical backfill or edit.
-  if (["invoice_ref_select", "quotation_ref_select"].includes(f.type)) {
+  if (["invoice_ref_select", "quotation_ref_select", "purchase_order_ref_select"].includes(f.type)) {
     return "text";
   }
   return f.type;
@@ -545,6 +546,17 @@ async function renderEntryForm(entryId) {
   const container = document.getElementById("formFieldsContainer");
   container.innerHTML = "";
 
+  if (entryId === "new_purchase_order") {
+    const infoBanner = document.createElement("div");
+    infoBanner.className = "form-group col-12";
+    infoBanner.innerHTML = `
+      <div style="padding:10px 14px; background:rgba(99,102,241,0.08); border:1px solid rgba(99,102,241,0.3); border-radius:8px; font-size:13px;">
+        Contact Person: <strong>Mr. Saidul Islam</strong> &nbsp;|&nbsp; Mobile: <strong>01830983633</strong>
+      </div>
+    `;
+    container.appendChild(infoBanner);
+  }
+
   const lineItemFieldNames = MULTI_ITEM_FIELDS[entryId] || [];
 
   for (const f of ep.fields) {
@@ -604,6 +616,23 @@ async function renderEntryForm(entryId) {
         } catch (e) { /* ignore */ }
       })();
       input.onchange = () => applyQuotationToSale(input.value);
+    } else if (effType === "purchase_order_ref_select") {
+      input = document.createElement("select");
+      input.className = "form-control";
+      input.innerHTML = `<option value="">-- No Purchase Order (manual entry) --</option>`;
+      (async () => {
+        try {
+          const r = await apiFetch(`/api/purchase_order_refs?client_id=${currentClientId}`);
+          const refs = await r.json();
+          refs.forEach(ref => {
+            const o = document.createElement("option");
+            o.value = ref.purchase_order_no;
+            o.innerText = `${ref.purchase_order_no} — ${ref.supplier_name}`;
+            input.appendChild(o);
+          });
+        } catch (e) { /* ignore */ }
+      })();
+      input.onchange = () => applyPurchaseOrderToPurchase(input.value);
     } else if (effType === "select") {
       input = document.createElement("select");
       input.className = "form-control";
@@ -917,14 +946,15 @@ async function renderEntryForm(entryId) {
   }
 
   // Live totals box
-  if (ep.table === 'sales' || ep.table === 'purchases' || ep.table === 'transporters' || ep.table === 'quotations') {
+  if (ep.table === 'sales' || ep.table === 'purchases' || ep.table === 'transporters' || ep.table === 'quotations' || ep.table === 'purchase_orders') {
     const totalBox = document.createElement("div");
     totalBox.className = "form-group col-12";
     totalBox.style.padding = "14px";
     totalBox.style.background = "rgba(99,102,241,0.1)";
     totalBox.style.borderRadius = "8px";
-    const totalLabel = ep.table === 'quotations' ? 'Total Quotation Price:' : 'Calculated Total:';
-    const dueRowDisplay = ep.table === 'quotations' ? 'none' : 'flex';
+    const noDueTable = ep.table === 'quotations' || ep.table === 'purchase_orders';
+    const totalLabel = ep.table === 'quotations' ? 'Total Quotation Price:' : ep.table === 'purchase_orders' ? 'Total Purchase Order Value:' : 'Calculated Total:';
+    const dueRowDisplay = noDueTable ? 'none' : 'flex';
     totalBox.innerHTML = `
       <div style="display:flex; justify-content:space-between; align-items:center;">
         <span style="font-weight:600; color:var(--accent-cyan);">${totalLabel}</span>
@@ -1729,6 +1759,92 @@ async function applyQuotationToSale(quotationNo) {
   }
 }
 
+// Auto-fill Purchase Entry's supplier + product line items from a confirmed
+// Purchase Order. Per the business requirement, everything else on the form
+// stays editable but the supplier and each line item's product type are
+// locked in place once a PO is linked — they came from a specific order the
+// business placed and must not silently drift from it. Leaving the dropdown
+// on "-- No Purchase Order --" re-renders the form fresh (fully unlocked).
+async function applyPurchaseOrderToPurchase(purchaseOrderNo) {
+  if (!purchaseOrderNo) { renderEntryForm("new_purchase"); return; }
+  try {
+    const res = await apiFetch(`/api/purchase_order/${encodeURIComponent(purchaseOrderNo)}?client_id=${currentClientId}`);
+    const data = await res.json();
+    if (data.status === "error") { alert("Purchase order not found."); return; }
+
+    const supplierSel = document.getElementById("input_supplier_name");
+    if (supplierSel) {
+      let matched = Array.from(supplierSel.options).find(o => o.value === data.supplier_name);
+      if (!matched) {
+        matched = document.createElement("option");
+        matched.value = data.supplier_name;
+        matched.innerText = data.supplier_name;
+        supplierSel.appendChild(matched);
+      }
+      supplierSel.selectedIndex = Array.from(supplierSel.options).indexOf(matched);
+      const mobileEl = document.getElementById("input_mobile_number");
+      if (mobileEl) mobileEl.value = data.mobile_number || matched.dataset.contact || "";
+      const addressEl = document.getElementById("input_address");
+      if (addressEl) addressEl.value = matched.dataset.address || "";
+
+      // Lock the supplier — customer name must not change once a PO is
+      // linked. A disabled <select> is dropped from FormData on submit, so
+      // its value is carried through a hidden mirror input instead.
+      supplierSel.disabled = true;
+      let hiddenSupplier = document.getElementById("po_locked_supplier_name");
+      if (!hiddenSupplier) {
+        hiddenSupplier = document.createElement("input");
+        hiddenSupplier.type = "hidden";
+        hiddenSupplier.id = "po_locked_supplier_name";
+        hiddenSupplier.name = "supplier_name";
+        supplierSel.insertAdjacentElement("afterend", hiddenSupplier);
+      }
+      hiddenSupplier.value = data.supplier_name || "";
+    }
+
+    // The PO's delivery address is where the supplier should deliver the
+    // goods — the same place recorded as the Purchase Entry's own
+    // Unloading Location.
+    const unloadEl = document.getElementById("input_unloading_location");
+    if (unloadEl && data.delivery_address) unloadEl.value = data.delivery_address;
+
+    const items = data.items || [];
+    const countEl = document.getElementById("lineItemCount");
+    if (countEl) countEl.value = items.length || 1;
+    renderLineItemRows("new_purchase", items.length || 1);
+
+    items.forEach((item, idx) => {
+      const selProduct = document.getElementById(`li_product_type_${idx}`);
+      if (selProduct) {
+        let matched = Array.from(selProduct.options).find(
+          o => o.value === item.product_type && (o.dataset.size || "") === (item.size || "")
+        );
+        if (!matched) {
+          matched = document.createElement("option");
+          matched.value = item.product_type;
+          matched.dataset.size = item.size || "";
+          matched.innerText = `${item.product_type} — ${item.size || ''} (from purchase order)`;
+          selProduct.appendChild(matched);
+        }
+        selProduct.selectedIndex = Array.from(selProduct.options).indexOf(matched);
+        // Lock the product type — type of goods must not change once a PO
+        // is linked. collectLineItems() reads .value via getElementById
+        // directly (not FormData), so a disabled <select> still submits fine.
+        selProduct.disabled = true;
+      }
+      const sizeEl = document.getElementById(`li_size_${idx}`);
+      if (sizeEl) sizeEl.value = item.size || "";
+      const qtyEl = document.getElementById(`li_quantity_${idx}`);
+      if (qtyEl) qtyEl.value = item.quantity || 0;
+      const priceEl = document.getElementById(`li_unit_price_${idx}`);
+      if (priceEl) priceEl.value = item.unit_price || 0;
+    });
+    recalcLineItemTotals("new_purchase");
+  } catch (err) {
+    alert("Failed to load purchase order: " + err.message);
+  }
+}
+
 async function handleFormSubmit(event) {
   event.preventDefault();
   if (!currentEntryId) return;
@@ -1858,10 +1974,12 @@ async function handleFormSubmit(event) {
       const msg = data.chalan_no ? `Sale saved (Chalan #${data.chalan_no})${countNote}.${pendingNote}` :
                   data.input_invoice_no ? `Purchase saved (Invoice #${data.input_invoice_no})${countNote}.${pendingNote}` :
                   data.quotation_no ? `Quotation saved (${data.quotation_no})${countNote} — pending admin approval.` :
+                  data.purchase_order_no ? `Purchase order saved (${data.purchase_order_no})${countNote} — pending admin confirmation.` :
                   `Record saved to table '${data.table}'.`;
       alert(msg);
       if (data.chalan_no) openInvoiceModal(data.chalan_no);
       if (data.quotation_no) openQuotationModal(data.quotation_no);
+      if (data.purchase_order_no) openPurchaseOrderModal(data.purchase_order_no);
       await refreshLookups();
       resetCurrentForm();
     } else {
@@ -1942,7 +2060,8 @@ const DELETABLE_REPORT_TABLES = {
   inventory_report: "inventory",
   products_report: "products",
   customer_report: "customers",
-  quotation_report: "quotations"
+  quotation_report: "quotations",
+  purchase_order_report: "purchase_orders"
 };
 
 // Adjust (due date / advance delta) only makes sense for transaction tables
@@ -2045,11 +2164,14 @@ async function loadReportData(reportId) {
     const canDownloadInvoice = reportId === 'sales_report';
     const canApproveQuotation = reportId === 'quotation_report' && currentUser && currentUser.role === 'admin';
     const canPrintQuotation = reportId === 'quotation_report';
+    const canConfirmPurchaseOrder = reportId === 'purchase_order_report' && currentUser && currentUser.role === 'admin';
+    const canPrintPurchaseOrder = reportId === 'purchase_order_report';
     const canUploadChallan = reportId === 'sales_report';
     const canEditPayment = reportId === 'payment_report' && currentUser && currentUser.role === 'admin';
     const canDeletePayment = reportId === 'payment_report' && currentUser && currentUser.role === 'admin';
     const showActions = canDelete || canAdjust || canEdit || canDownloadInvoice ||
-      canApproveQuotation || canPrintQuotation || canUploadChallan || canEditPayment || canDeletePayment;
+      canApproveQuotation || canPrintQuotation || canConfirmPurchaseOrder || canPrintPurchaseOrder ||
+      canUploadChallan || canEditPayment || canDeletePayment;
 
     const NUM_COLS = new Set(["qty","quantity","unit price","total","advance","due","rent","cost","price","amount","transport cost","profit","revenue","stock valuation","cost price","sale price"]);
     const theadTr = document.getElementById("reportTableHead");
@@ -2104,8 +2226,14 @@ async function loadReportData(reportId) {
           if (canPrintQuotation) {
             html += `<button class="btn btn-secondary" style="padding:4px 10px; font-size:11px; margin-right:6px;" onclick="openQuotationModal('${row.quotation_no}')"><i class="fa-solid fa-print"></i> Print</button>`;
           }
+          if (canPrintPurchaseOrder) {
+            html += `<button class="btn btn-secondary" style="padding:4px 10px; font-size:11px; margin-right:6px;" onclick="openPurchaseOrderModal('${row.purchase_order_no}')"><i class="fa-solid fa-print"></i> Print</button>`;
+          }
           if (canApproveQuotation && row.status === 'pending') {
             html += `<button class="btn btn-primary" style="padding:4px 10px; font-size:11px; margin-right:6px;" onclick="approveQuotationRow('${row.quotation_no}')"><i class="fa-solid fa-check"></i> Approve</button>`;
+          }
+          if (canConfirmPurchaseOrder && row.status === 'pending') {
+            html += `<button class="btn btn-primary" style="padding:4px 10px; font-size:11px; margin-right:6px;" onclick="confirmPurchaseOrderRow('${row.purchase_order_no}')"><i class="fa-solid fa-check"></i> Confirm</button>`;
           }
           if (canEdit) {
             html += `<button class="btn btn-secondary" style="padding:4px 10px; font-size:11px; margin-right:6px;" onclick="openEditRecordModalFromReport('${reportId}', ${row.id})"><i class="fa-solid fa-pen-to-square"></i> Edit</button>`;
@@ -2442,6 +2570,25 @@ async function approveQuotationRow(quotationNo) {
       if (currentReportId) loadReportData(currentReportId);
     } else {
       alert("Approval failed: " + data.message);
+    }
+  } catch (err) {
+    alert("Connection error: " + err.message);
+  }
+}
+
+async function confirmPurchaseOrderRow(purchaseOrderNo) {
+  if (!confirm(`Confirm purchase order ${purchaseOrderNo}? It will then be selectable for linking into a Purchase Entry.`)) return;
+  try {
+    const res = await apiFetch(`/api/purchase_order/${encodeURIComponent(purchaseOrderNo)}/confirm`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ client_id: currentClientId })
+    });
+    const data = await res.json();
+    if (data.status === "success") {
+      if (currentReportId) loadReportData(currentReportId);
+    } else {
+      alert("Confirmation failed: " + data.message);
     }
   } catch (err) {
     alert("Connection error: " + err.message);
@@ -3223,6 +3370,66 @@ function saveQuotationAsDoc() {
 
 function closeQuotationModal() {
   document.getElementById("quotationModal").classList.remove("active");
+}
+
+// Purchase Order pad — deliberately the exact same fixed-size business pad
+// as the Sales Chalan Invoice (openInvoiceModal above), not the growing
+// letter-style layout the Quotation pad uses: same applyPadBackground call
+// (no forceTextHeader, so a configured pad-image background renders here
+// too), same meta-row/table/totals/signature-row structure, and the same
+// saveElementAsPDF() single-fixed-page export.
+async function openPurchaseOrderModal(purchaseOrderNo) {
+  if (!purchaseOrderNo) return;
+  try {
+    const res = await apiFetch(`/api/purchase_order/${encodeURIComponent(purchaseOrderNo)}?client_id=${currentClientId}`);
+    const data = await res.json();
+    if (data.status === "error") { alert("Purchase order not found."); return; }
+
+    const lh = data.letterhead || {};
+    const padPaper = document.getElementById("poPadPaper");
+    const headerArea = document.getElementById("poHeaderArea");
+    const padDivider = document.getElementById("poDividerLine");
+
+    const ribbon = document.getElementById("poPendingRibbon");
+    if (ribbon) ribbon.style.display = data.status === "pending" ? "block" : "none";
+
+    applyPadBackground(padPaper, headerArea, padDivider, lh, {
+      companyTitleId: "poCompanyTitle", subHeadingId: "poSubHeading", contactLineId: "poContactLine"
+    });
+
+    document.getElementById("poCustName").innerText = data.supplier_name || "-";
+    document.getElementById("poCustPhone").innerText = data.mobile_number ? `Phone: ${data.mobile_number}` : "";
+    document.getElementById("poCustLocation").innerText = data.delivery_address ? `Delivery: ${data.delivery_address}` : "";
+    document.getElementById("poInvNo").innerText = data.purchase_order_no || "-";
+    document.getElementById("poInvDate").innerText = data.po_date || "-";
+
+    const items = data.items || [];
+    const rowsHtml = items.map((item, i) => {
+      const qty = parseFloat(item.quantity || 0);
+      const price = parseFloat(item.unit_price || 0);
+      const rowTotal = qty * price;
+      return `
+      <tr>
+        <td>${i + 1}</td>
+        <td><strong>${item.product_type || '-'}</strong></td>
+        <td>${item.size || '-'}</td>
+        <td style="text-align:center;">${qty}</td>
+        <td style="text-align:right;">${price.toFixed(2)}</td>
+        <td style="text-align:right;"><strong>${rowTotal.toFixed(2)}</strong></td>
+      </tr>`;
+    }).join('');
+    document.getElementById("poItemsBody").innerHTML = rowsHtml;
+    document.getElementById("poGrandTotal").innerText = `BDT ${(data.grand_total || 0).toFixed(2)}`;
+    document.getElementById("poFooterNote").innerText = lh.footer_note || "Thank you for doing business with Jahan Trading!";
+
+    document.getElementById("purchaseOrderModal").classList.add("active");
+  } catch (err) {
+    alert("Failed to load purchase order: " + err.message);
+  }
+}
+
+function closePurchaseOrderModal() {
+  document.getElementById("purchaseOrderModal").classList.remove("active");
 }
 
 // The client's real pre-printed business pad is US Letter (8.5in x 11in),
