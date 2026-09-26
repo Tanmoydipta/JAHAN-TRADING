@@ -22,7 +22,8 @@ from database import (
     save_challan_upload,
     list_customers_with_dues, list_customer_dues, save_payment,
     get_payment_detail, update_payment, delete_payment,
-    get_available_credit, get_po_invoice_data
+    get_available_credit, get_po_invoice_data,
+    list_purchase_invoice_refs, get_purchase_invoice_data
 )
 from google_drive import upload_challan_to_drive, upload_letterhead_pad_image, download_file_from_drive
 
@@ -623,6 +624,28 @@ def api_approve_quotation(quotation_no):
         return jsonify({"status": "error", "message": str(e)}), 403
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 400
+
+
+@app.route('/api/purchase_invoice_refs', methods=['GET'])
+def api_purchase_invoice_refs():
+    client_id = _scoped_client_id(request.args.get('client_id'))
+    if client_id is None:
+        return _forbidden()
+    try:
+        return jsonify(list_purchase_invoice_refs(client_id))
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+
+
+@app.route('/api/purchase_invoice/<input_invoice_no>', methods=['GET'])
+def api_get_purchase_invoice(input_invoice_no):
+    client_id = _scoped_client_id(request.args.get('client_id'))
+    if client_id is None:
+        return _forbidden()
+    res = get_purchase_invoice_data(input_invoice_no, client_id=client_id)
+    if not res:
+        return jsonify({"status": "error", "message": "Purchase invoice not found"}), 404
+    return jsonify(res)
 
 
 @app.route('/api/purchase_order_refs', methods=['GET'])

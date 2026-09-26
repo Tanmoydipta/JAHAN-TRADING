@@ -482,7 +482,7 @@ function effectiveFieldType(f, entryId) {
   // branch below) — only reference-number lookups tied to a *live*
   // transaction (an existing chalan/quotation) get downgraded, since
   // there's nothing live to reference during a historical backfill or edit.
-  if (["invoice_ref_select", "quotation_ref_select", "purchase_order_ref_select"].includes(f.type)) {
+  if (["invoice_ref_select", "quotation_ref_select", "purchase_order_ref_select", "purchase_invoice_ref_select"].includes(f.type)) {
     return "text";
   }
   return f.type;
@@ -633,6 +633,23 @@ async function renderEntryForm(entryId) {
         } catch (e) { /* ignore */ }
       })();
       input.onchange = () => applyPurchaseOrderToPurchase(input.value);
+    } else if (effType === "purchase_invoice_ref_select") {
+      input = document.createElement("select");
+      input.className = "form-control";
+      input.innerHTML = `<option value="">-- No Purchase Invoice (manual entry) --</option>`;
+      (async () => {
+        try {
+          const r = await apiFetch(`/api/purchase_invoice_refs?client_id=${currentClientId}`);
+          const refs = await r.json();
+          refs.forEach(ref => {
+            const o = document.createElement("option");
+            o.value = ref.input_invoice_no;
+            o.innerText = `${ref.input_invoice_no} — ${ref.supplier_name}`;
+            input.appendChild(o);
+          });
+        } catch (e) { /* ignore */ }
+      })();
+      input.onchange = () => applyPurchaseInvoiceToSale(input.value);
     } else if (effType === "select") {
       input = document.createElement("select");
       input.className = "form-control";
@@ -1756,6 +1773,76 @@ async function applyQuotationToSale(quotationNo) {
     recalcLineItemTotals("new_sale");
   } catch (err) {
     alert("Failed to load quotation: " + err.message);
+  }
+}
+
+// "Direct from Purchase" — copies transporter/truck/loading-location and
+// every line item's product/size/quantity/cost straight from an existing
+// purchase invoice into a new Sales Entry, so a batch bought in can be
+// resold without retyping its details. Buyer and sale price are never
+// filled here (different party, new price decision) and every field stays
+// a normal editable input afterward, same as applyQuotationToSale() above.
+async function applyPurchaseInvoiceToSale(inputInvoiceNo) {
+  if (!inputInvoiceNo) return;
+  try {
+    const res = await apiFetch(`/api/purchase_invoice/${encodeURIComponent(inputInvoiceNo)}?client_id=${currentClientId}`);
+    const data = await res.json();
+    if (data.status === "error") { alert("Purchase invoice not found."); return; }
+
+    const transporterSel = document.getElementById("input_transporter_name");
+    if (transporterSel && data.transporter_name) {
+      let matched = Array.from(transporterSel.options).find(o => o.value === data.transporter_name);
+      if (!matched) {
+        matched = document.createElement("option");
+        matched.value = data.transporter_name;
+        matched.innerText = data.transporter_name;
+        transporterSel.appendChild(matched);
+      }
+      transporterSel.selectedIndex = Array.from(transporterSel.options).indexOf(matched);
+    }
+    const truckEl = document.getElementById("input_truck_no");
+    if (truckEl && data.truck_no) truckEl.value = data.truck_no;
+    // The purchase's own unloading_location (where those goods arrived) is
+    // where the onward sale shipment now loads from — and doubles as a
+    // sensible default for the sale's own Unloading Location too, since a
+    // "direct from purchase" sale is often shipped straight out from the
+    // same site without a separate warehouse leg. Both stay editable.
+    const loadingEl = document.getElementById("input_loading_location");
+    if (loadingEl && data.loading_location) loadingEl.value = data.loading_location;
+    const unloadingEl = document.getElementById("input_unloading_location");
+    if (unloadingEl && data.loading_location) unloadingEl.value = data.loading_location;
+
+    const items = data.items || [];
+    const countEl = document.getElementById("lineItemCount");
+    if (countEl) countEl.value = items.length || 1;
+    renderLineItemRows("new_sale", items.length || 1);
+
+    items.forEach((item, idx) => {
+      const selProduct = document.getElementById(`li_product_type_${idx}`);
+      if (selProduct) {
+        let matched = Array.from(selProduct.options).find(
+          o => o.value === item.product_type && (o.dataset.size || "") === (item.size || "")
+        );
+        if (!matched) {
+          matched = document.createElement("option");
+          matched.value = item.product_type;
+          matched.dataset.size = item.size || "";
+          matched.dataset.cost = item.unit_price || 0;
+          matched.innerText = `${item.product_type} — ${item.size || ''} (from purchase ${inputInvoiceNo})`;
+          selProduct.appendChild(matched);
+        }
+        selProduct.selectedIndex = Array.from(selProduct.options).indexOf(matched);
+      }
+      const sizeEl = document.getElementById(`li_size_${idx}`);
+      if (sizeEl) sizeEl.value = item.size || "";
+      const costEl = document.getElementById(`li_cost_price_${idx}`);
+      if (costEl) costEl.value = item.unit_price || 0;
+      const qtyEl = document.getElementById(`li_received_quantity_${idx}`);
+      if (qtyEl) qtyEl.value = item.quantity || 0;
+    });
+    recalcLineItemTotals("new_sale");
+  } catch (err) {
+    alert("Failed to load purchase invoice: " + err.message);
   }
 }
 
@@ -2898,7 +2985,6 @@ async function openInvoiceModal(invoiceRef) {
     document.getElementById("padCustName").innerText = sale.buyer_name || "-";
     document.getElementById("padCustAddress").innerText = sale.address || "";
     document.getElementById("padCustPhone").innerText = sale.contact_number ? `Phone: ${sale.contact_number}` : "";
-    document.getElementById("padCustLocation").innerText = sale.unloading_location ? `Delivery: ${sale.unloading_location}` : "";
     document.getElementById("padInvNo").innerText = sale.chalan_no || "-";
     document.getElementById("padInvDate").innerText = sale.sale_date || "-";
     document.getElementById("padPoOrder").innerText = sale.po_order || "-";
@@ -2920,6 +3006,7 @@ async function openInvoiceModal(invoiceRef) {
         <td><strong>${item.product_type || '-'}</strong></td>
         <td>${item.size || '-'}</td>
         <td style="text-align:center;">${qty}</td>
+        <td>${item.unloading_location || '-'}</td>
         <td style="text-align:right;">${price.toFixed(2)}</td>
         <td style="text-align:right;"><strong>${rowSubtotal.toFixed(2)}</strong></td>
       </tr>`;
@@ -2995,6 +3082,7 @@ async function generatePoInvoice() {
         <td>${item.size || '-'}</td>
         <td style="text-align:center;"><strong>${qty}</strong></td>
         <td>${item.truck_no || '-'}</td>
+        <td>${item.unloading_location || '-'}</td>
         <td style="text-align:right;">${price.toFixed(2)}</td>
         <td style="text-align:right;"><strong>${amount.toFixed(2)}</strong></td>
       </tr>`;

@@ -1694,7 +1694,7 @@ def get_po_invoice_data(customer, po_order, client_id=None):
     cursor = conn.cursor()
     ph = _ph(mode)
     cursor.execute(
-        f"SELECT id, chalan_no, sale_date, buyer_name, address, product_type, size, "
+        f"SELECT id, chalan_no, sale_date, buyer_name, address, unloading_location, product_type, size, "
         f"received_quantity, sale_unit_price, sale_total_price, truck_no, advance, due "
         f"FROM sales WHERE client_id = {ph} AND buyer_name = {ph} AND po_order = {ph} "
         f"AND status = 'authorized' ORDER BY sale_date ASC, id ASC",
@@ -1721,6 +1721,59 @@ def get_po_invoice_data(customer, po_order, client_id=None):
         "total_quantity": round(sum(float(i.get('received_quantity') or 0) for i in items), 2),
         "letterhead": get_letterhead_settings(),
         "system": config.get('system', {})
+    }
+
+
+def list_purchase_invoice_refs(client_id=None):
+    """Existing purchase invoices available to link into a Sales Entry
+    (the 'Direct from Purchase' auto-fill), grouped one row per
+    input_invoice_no the same way list_invoice_refs() groups chalans."""
+    config = load_config()
+    if not client_id:
+        client_id = config['system'].get('default_client_id', 'CLI-001')
+    conn, mode = get_db_connection()
+    cursor = conn.cursor()
+    ph = _ph(mode)
+    cursor.execute(
+        f"SELECT input_invoice_no, MAX(supplier_name) as supplier_name "
+        f"FROM purchases WHERE client_id = {ph} "
+        f"GROUP BY input_invoice_no ORDER BY input_invoice_no DESC",
+        (client_id,)
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_purchase_invoice_data(input_invoice_no, client_id=None):
+    """All line items sharing one purchase invoice number, for Sales Entry's
+    'Direct from Purchase' auto-fill — mirrors get_quotation_data()'s shape.
+    The purchase's own unloading_location (where those goods arrived) feeds
+    the sale's loading_location (where they now ship out from), same logic
+    already used for transporter auto-fill."""
+    config = load_config()
+    if not client_id:
+        client_id = config['system'].get('default_client_id', 'CLI-001')
+    conn, mode = get_db_connection()
+    cursor = conn.cursor()
+    ph = _ph(mode)
+    cursor.execute(
+        f"SELECT * FROM purchases WHERE input_invoice_no = {ph} AND client_id = {ph} ORDER BY id ASC",
+        (input_invoice_no, client_id)
+    )
+    rows = cursor.fetchall()
+    items = [dict(r) for r in rows] if mode == 'sqlite' else list(rows)
+    conn.close()
+    if not items:
+        return None
+    header = items[0]
+    return {
+        "input_invoice_no": input_invoice_no,
+        "supplier_name": header.get('supplier_name'),
+        "transporter_name": header.get('transporter_name'),
+        "truck_no": header.get('truck_no'),
+        "loading_location": header.get('unloading_location'),
+        "items": items
     }
 
 
