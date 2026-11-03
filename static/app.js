@@ -634,22 +634,35 @@ async function renderEntryForm(entryId) {
       })();
       input.onchange = () => applyPurchaseOrderToPurchase(input.value);
     } else if (effType === "purchase_invoice_ref_select") {
-      input = document.createElement("select");
+      // Searchable: the datalist option text is "invoice — supplier", so typing
+      // either part (e.g. the supplier name) narrows the list; the chosen text
+      // is mapped back to the bare invoice number.
+      input = document.createElement("input");
+      input.type = "text";
       input.className = "form-control";
-      input.innerHTML = `<option value="">-- No Purchase Invoice (manual entry) --</option>`;
+      input.autocomplete = "off";
+      input.placeholder = "Type supplier name or invoice no. (blank = manual entry)";
+      const dl = document.createElement("datalist");
+      dl.id = `combo_${Math.random().toString(36).slice(2)}`;
+      input.setAttribute("list", dl.id);
+      pendingDatalist = dl;
+      const invByLabel = {};
       (async () => {
         try {
           const r = await apiFetch(`/api/purchase_invoice_refs?client_id=${currentClientId}`);
           const refs = await r.json();
           refs.forEach(ref => {
+            const label = `${ref.input_invoice_no} — ${ref.supplier_name}`;
+            invByLabel[label] = ref.input_invoice_no;
             const o = document.createElement("option");
-            o.value = ref.input_invoice_no;
-            o.innerText = `${ref.input_invoice_no} — ${ref.supplier_name}`;
-            input.appendChild(o);
+            o.value = label;
+            dl.appendChild(o);
           });
         } catch (e) { /* ignore */ }
       })();
-      input.onchange = () => applyPurchaseInvoiceToSale(input.value);
+      input.addEventListener("input", () => {
+        if (input.value in invByLabel) applyPurchaseInvoiceToSale(invByLabel[input.value]);
+      });
     } else if (effType === "select") {
       input = document.createElement("select");
       input.className = "form-control";
