@@ -1737,7 +1737,7 @@ def list_purchase_invoice_refs(client_id=None):
     cursor.execute(
         f"SELECT input_invoice_no, MAX(supplier_name) as supplier_name "
         f"FROM purchases WHERE client_id = {ph} "
-        f"GROUP BY input_invoice_no ORDER BY input_invoice_no DESC",
+        f"GROUP BY input_invoice_no ORDER BY MAX(purchase_date) DESC, MAX(id) DESC",
         (client_id,)
     )
     rows = cursor.fetchall()
