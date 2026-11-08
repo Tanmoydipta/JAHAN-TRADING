@@ -756,10 +756,14 @@ select.form-control {
    applyPadBackground()) rather than being a fixed-height box, so its footer
    note flows normally after the signoff line instead of being pinned to a
    fixed offset from the bottom like the invoice pad's .pad-footer is. */
-#qpFooterNote {
-  position: static;
-  margin-top: 16px;
-}
+/* Now that the quotation shares the invoice's fixed Letter pad, its footer
+   note uses the invoice's pinned .pad-footer position again, and the letter
+   body is a column so the Signature/Date line sits just above the footer
+   instead of floating mid-page. */
+#quotationPadPaper { display: flex; flex-direction: column; box-sizing: border-box; }
+#quotationPadPaper .pad-letter-signoff { margin-top: auto; margin-bottom: 40px; }
+#quotationPadPaper .pad-letter-intro { margin-bottom: 8px; }
+#quotationPadPaper .pad-table { margin-bottom: 8px; }
 
 /* The PO-wise Invoice pad also grows to fit content (an unbounded number of
    chalans) — it originally reused the fixed-size invoice pad's
