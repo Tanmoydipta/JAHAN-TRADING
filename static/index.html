@@ -717,7 +717,7 @@
           <button class="btn btn-primary" onclick="window.print()">
             <i class="fa-solid fa-print"></i> Print
           </button>
-          <button class="btn btn-secondary" onclick="saveQuotationAsPDF()">
+          <button class="btn btn-secondary" onclick="saveElementAsPDF('quotationPadPaper', 'Quotation_' + (document.getElementById('qpInvNo')?.innerText || 'quote'))">
             <i class="fa-solid fa-download"></i> Save PDF
           </button>
           <button class="btn btn-secondary" onclick="saveQuotationAsDoc()">

@@ -3275,7 +3275,7 @@ async function openQuotationModal(quotationNo) {
 
     applyPadBackground(padPaper, headerArea, padDivider, lh, {
       companyTitleId: "qpCompanyTitle", subHeadingId: "qpSubHeading", contactLineId: "qpContactLine"
-    }, { forceTextHeader: true });
+    });
 
     document.getElementById("qpCustName").innerText = data.customer_name || "-";
     document.getElementById("qpCustAddress").innerText = data.address || "";
